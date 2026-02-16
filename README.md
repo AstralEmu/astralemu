@@ -44,12 +44,14 @@ The build system is a GitHub Actions workflow that dynamically manages every axi
 
 ## Package Repositories
 
-AstralEmu maintains its own APT, DNF, and Pacman repositories. Every standalone emulator and RetroArch core is rebuilt daily from source with:
+AstralEmu maintains its own APT, DNF, and Pacman repositories, hosted on [astralemu-packages](https://github.com/AstralEmu/astralemu-packages). Every standalone emulator and RetroArch core is rebuilt daily from source with:
 
 - **Architecture-specific compilation** — Packages are built targeting the exact CPU features of each supported device
 - **LTO=thin** — Link-time optimization for smaller, faster binaries
 - **jemalloc** — Replaces the default allocator for better memory performance
 - **Hardware dependencies** — Device-specific packages for embedded targets (RK3588, etc.)
+
+See the [astralemu-packages README](https://github.com/AstralEmu/astralemu-packages) for repo setup instructions.
 
 ## Performance Manager
 
