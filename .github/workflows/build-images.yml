@@ -230,17 +230,10 @@ jobs:
             IS_PRERELEASE="true"
           fi
 
-          # For cron builds, use fixed daily tag
           if [ "${{ steps.build_type.outputs.type }}" = "cron" ]; then
-            if [ "$IS_PRERELEASE" = "true" ]; then
-              RELEASE_TAG="daily-${RELEASE_DATE}-${{ github.ref_name }}"
-              RELEASE_NAME="Daily Build ${RELEASE_DATE} (${{ github.ref_name }})"
-            else
-              RELEASE_TAG="daily-${RELEASE_DATE}"
-              RELEASE_NAME="Daily Build ${RELEASE_DATE}"
-            fi
+            RELEASE_TAG="daily-${RELEASE_DATE}"
+            RELEASE_NAME="Daily Build ${RELEASE_DATE}"
           else
-            # For push/manual builds, use timestamp tag
             if [ "$IS_PRERELEASE" = "false" ]; then
               RELEASE_TAG="v${RELEASE_DATE}-${RELEASE_TIME}"
               RELEASE_NAME="Release ${RELEASE_DATE}"
@@ -256,149 +249,69 @@ jobs:
           echo "date=${RELEASE_DATE}" >> $GITHUB_OUTPUT
           echo "time=${RELEASE_TIME}" >> $GITHUB_OUTPUT
 
-      - name: Generate changelog (for push builds)
-        if: steps.build_type.outputs.type == 'push'
-        id: changelog
+      - name: Generate changelog
         run: |
-          # Get the last release tag
-          LAST_TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || echo "")
+          # Commits since last release (exclude daily builds)
+          LAST_TAG=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("daily-") | not)][0].tagName' 2>/dev/null || echo "")
 
           if [ -z "$LAST_TAG" ]; then
-            echo "No previous release found, generating full changelog"
-            CHANGELOG=$(git log --pretty=format:"- %s (%h) - %an" --no-merges)
+            CHANGELOG=$(git log --pretty=format:'- %s (`%h`)' --no-merges -20)
           else
-            echo "Generating changelog since $LAST_TAG"
-            CHANGELOG=$(git log ${LAST_TAG}..HEAD --pretty=format:"- %s (%h) - %an" --no-merges)
+            CHANGELOG=$(git log ${LAST_TAG}..HEAD --pretty=format:'- %s (`%h`)' --no-merges)
           fi
 
-          # Save changelog to file
-          if [ -n "$CHANGELOG" ]; then
-            echo "### 📝 Changelog" > changelog.md
-            echo "" >> changelog.md
-            echo "$CHANGELOG" >> changelog.md
-            echo "" >> changelog.md
+          if [ -z "$CHANGELOG" ]; then
+            echo "No new commits since last build." > changelog.md
           else
-            echo "### 📝 Changelog" > changelog.md
-            echo "" >> changelog.md
-            echo "No new commits since last release." >> changelog.md
-            echo "" >> changelog.md
+            echo "$CHANGELOG" > changelog.md
           fi
 
-          echo "Changelog generated:"
+          echo "Changelog:"
           cat changelog.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create release body (push builds)
-        if: steps.build_type.outputs.type == 'push'
+      - name: Create release body
         run: |
-          # Determine branch-specific header and warnings
-          if [ "${{ github.ref_name }}" = "main" ]; then
-            cat > release_body.md << 'EOF'
-          ## 🚀 AstralEmu Images - ${{ steps.release_info.outputs.date }}
+          cat > release_body.md << 'BANNER'
+          <p align="center">
+            <img src="https://github.com/AstralEmu/.github/raw/refs/heads/main/profile/banner-astralemu.svg" alt="AstralEmu" width="100%"/>
+          </p>
 
-          Multi-device emulation images (Raspberry Pi, Nintendo Switch, and more).
+          BANNER
 
-          ### 📦 Available Images
+          echo "# ${{ steps.release_info.outputs.name }}" >> release_body.md
 
-          Images are being built and will be uploaded as they complete.
-
-          EOF
-          elif [ "${{ github.ref_name }}" = "test" ]; then
-            cat > release_body.md << 'EOF'
-          ## 🧪 TEST BUILD - AstralEmu Images - ${{ steps.release_info.outputs.date }}
-
-          > **⚠️ WARNING - TEST BUILD**
-          >
-          > These images are from the `test` branch and are for testing purposes only.
-          > **NO GUARANTEE of functionality is provided.**
-          >
-          > - Do not use in production
-          > - May contain critical bugs
-          > - May not boot properly
-          > - Use at your own risk
-          >
-          > For stable images, check releases from the `main` branch.
-
-          Multi-device emulation images (Raspberry Pi, Nintendo Switch, and more).
-
-          ### 📦 Available Images
-
-          Images are being built and will be uploaded as they complete.
-
-          EOF
-          elif [ "${{ github.ref_name }}" = "preview" ]; then
-            cat > release_body.md << 'EOF'
-          ## 🔍 PREVIEW BUILD - AstralEmu Images - ${{ steps.release_info.outputs.date }}
-
-          > **ℹ️ Preview Build**
-          >
-          > These images are from the `preview` branch and are preview versions.
-          > They may contain experimental or in-development features.
-          >
-          > Test at your own risk. For stable versions, check releases from the `main` branch.
-
-          Multi-device emulation images (Raspberry Pi, Nintendo Switch, and more).
-
-          ### 📦 Available Images
-
-          Images are being built and will be uploaded as they complete.
-
-          EOF
+          if [ "${{ steps.release_info.outputs.prerelease }}" = "true" ]; then
+            echo "> **Pre-release (\`${{ github.ref_name }}\`)** — These images may be unstable. For stable images, use releases from \`main\`." >> release_body.md
+            echo "" >> release_body.md
           fi
 
-          # Add changelog if it exists
-          if [ -f changelog.md ]; then
-            cat changelog.md >> release_body.md
-          fi
+          {
+            echo ""
+            echo "## Changelog"
+            echo ""
+            cat changelog.md
+            echo ""
+            echo "---"
+            echo ""
+          } >> release_body.md
 
-          cat >> release_body.md << 'EOF'
+          cat >> release_body.md << 'FOOTER'
+          <p align="center">
+            <a href="https://github.com/AstralEmu/astralemu">Main Repo</a> •
+            <a href="https://astralemu.github.io">Documentation</a> •
+            <a href="https://github.com/orgs/AstralEmu/discussions">Community</a>
+          </p>
+          FOOTER
 
-          ### 🔧 Build Info
-
-          - **Branch** : `${{ github.ref_name }}`
-          - **Commit** : `${{ github.sha }}`
-          - **Date** : `${{ steps.release_info.outputs.date }}`
-          - **Workflow** : [Build #${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-          ### 📚 Documentation
-
-          See [README.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md) for more information.
-          EOF
-
-      - name: Create release body (cron/manual builds)
-        if: steps.build_type.outputs.type != 'push'
-        run: |
-          cat > release_body.md << 'EOF'
-          ## 🚀 AstralEmu Images - Daily Build
-
-          Multi-device emulation images (Raspberry Pi, Nintendo Switch, and more).
-
-          **🕐 Build started:** `${{ steps.release_info.outputs.date }}` at `${{ steps.release_info.outputs.time }}`
-
-          ### 📦 Available Images
-
-          Images are being built and will be uploaded as they complete.
-
-          ### 🔧 Build Info
-
-          - **Branch** : `${{ github.ref_name }}`
-          - **Last Commit** : `${{ github.sha }}`
-          - **Build Date** : `${{ steps.release_info.outputs.date }}` at `${{ steps.release_info.outputs.time }}`
-          - **Workflow** : [Build #${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-          ### 📚 Documentation
-
-          See [README.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md) for more information.
-          EOF
-
-      - name: Delete existing release if exists (cron builds)
+      - name: Delete previous daily release
         if: steps.build_type.outputs.type == 'cron'
         run: |
-          # Delete existing release if it exists
-          if gh release view ${{ steps.release_info.outputs.tag }} >/dev/null 2>&1; then
-            echo "Deleting existing release ${{ steps.release_info.outputs.tag }}..."
-            gh release delete ${{ steps.release_info.outputs.tag }} --yes
+          OLD_DAILY=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("daily-"))][0].tagName' 2>/dev/null || echo "")
+          if [ -n "$OLD_DAILY" ]; then
+            echo "Deleting previous daily release $OLD_DAILY..."
+            gh release delete "$OLD_DAILY" --yes --cleanup-tag
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
