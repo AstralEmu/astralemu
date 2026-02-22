@@ -1,0 +1,20 @@
+# Hekate boot entry for Switch Linux
+# This file is copied to SD:/bootloader/ini/ during installation
+
+[{{BUILD_NAME}}]
+l4t=1
+boot_prefixes=/switchroot/{{BUILD_NAME}}/
+id={{HEKATE_ID}}
+
+; Boot arguments passed to kernel via boot.scr
+; swlinux.image= selects which linux_img/<name>/ to boot
+bootargs_extra=quiet swlinux.image={{BUILD_NAME}}
+
+; Optional: Uncomment to enable serial console debug output
+;uart_port=0
+
+; Optional: Uncomment to disable USB3 (may improve compatibility)
+;usb3_enable=0
+
+; Optional: Uncomment to disable Joy-Con rail (if using Bluetooth only)
+;jc_rail_disable=0

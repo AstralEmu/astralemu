@@ -1,0 +1,10 @@
+packages:
+  apt:
+    - waydroid
+    - python3
+  fedora:
+    - waydroid
+    - python3
+  arch:
+    - waydroid
+    - python

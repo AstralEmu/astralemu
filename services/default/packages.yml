@@ -1,0 +1,51 @@
+packages:
+  apt:
+    - wayland-protocols
+    - libwayland-client0
+    - libwayland-server0
+    - cage
+    - xwayland
+    - pipewire
+    - pipewire-audio
+    - pipewire-pulse
+    - wireplumber
+    - fonts-dejavu-core
+    - libsdl2-2.0-0
+    - libfreeimage3
+    - libfreetype6
+    - libcurl4
+    - libpugixml1v5
+    - libfuse2t64
+  fedora:
+    - wayland-protocols-devel
+    - libwayland-client
+    - libwayland-server
+    - cage
+    - xorg-x11-server-Xwayland
+    - pipewire
+    - pipewire-alsa
+    - pipewire-pulseaudio
+    - wireplumber
+    - dejavu-sans-fonts
+    - SDL2
+    - freeimage
+    - freetype
+    - libcurl
+    - pugixml
+    - fuse
+  arch:
+    - wayland-protocols
+    - wayland
+    - cage
+    - xorg-xwayland
+    - pipewire
+    - pipewire-audio
+    - pipewire-pulse
+    - wireplumber
+    - ttf-dejavu
+    - sdl2
+    - freeimage
+    - freetype2
+    - curl
+    - pugixml
+    - fuse2

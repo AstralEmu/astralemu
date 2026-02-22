@@ -1,0 +1,502 @@
+name: Build AstralEmu Images
+
+on:
+  push:
+    branches:
+      - main
+      - test
+      - preview
+    paths:
+      - '.github/workflows/build-images.yml'
+      - '.github/images.txt'
+      - 'devices/**'
+      - 'services/**'
+      - 'bin/**'
+      - 'output_formats/**'
+      - 'devices.yml'
+  schedule:
+    # Daily build at 2:00 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    # Allows manual trigger
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  # Job 1: Detect available images and their runners
+  detect-images:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Generate build matrix from images.txt + devices.yml
+        id: matrix
+        run: |
+          # Build a JSON matrix with image name + runner for each entry
+          MATRIX_ENTRIES="[]"
+
+          while IFS= read -r line; do
+            # Skip comments and empty lines
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line// }" ]] && continue
+            line=$(echo "$line" | xargs)
+
+            # Extract device ID (first part before /)
+            DEVICE_ID=$(echo "$line" | cut -d'/' -f1)
+
+            # Look up runner in devices.yml
+            RUNNER=$(yq ".devices[] | select(.id == \"$DEVICE_ID\") | .runner" devices.yml)
+
+            if [ -z "$RUNNER" ] || [ "$RUNNER" = "null" ]; then
+              echo "WARNING: No runner found for device '$DEVICE_ID', skipping '$line'"
+              continue
+            fi
+
+            # Add to matrix
+            MATRIX_ENTRIES=$(echo "$MATRIX_ENTRIES" | jq --arg img "$line" --arg runner "$RUNNER" '. + [{"image": $img, "runner": $runner}]')
+          done < .github/images.txt
+
+          MATRIX=$(echo "{\"include\": $MATRIX_ENTRIES}" | jq -c .)
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "Build matrix:"
+          echo "$MATRIX" | jq .
+
+  # Job 2: Stage 1+2 - Download and QEMU Setup (parallel for all images)
+  stage1-2-download-qemu:
+    needs: detect-images
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix: ${{ fromJSON(needs.detect-images.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Generate sanitized artifact name
+        id: artifact
+        run: |
+          # Replace / and + with - for artifact names
+          SANITIZED=$(echo "${{ matrix.image }}" | tr '/+' '--')
+          echo "name=${SANITIZED}" >> $GITHUB_OUTPUT
+          echo "Artifact name: ${SANITIZED}"
+
+      - name: Free disk space
+        run: |
+          # Free up disk space for large images
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force 2>/dev/null || true
+          df -h
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            wget \
+            genisoimage \
+            xz-utils \
+            qemu-utils
+
+          # Install yq
+          ARCH=$(dpkg --print-architecture)
+          sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}"
+          sudo chmod +x /usr/local/bin/yq
+
+          # Install QEMU system emulation only if not running on native arch
+          DEVICE_ARCH=$(yq ".devices[] | select(.id == \"$(echo '${{ matrix.image }}' | cut -d'/' -f1)\") | .arch" devices.yml)
+          HOST_ARCH=$(dpkg --print-architecture)
+          if [ "$HOST_ARCH" = "$DEVICE_ARCH" ] || { [ "$HOST_ARCH" = "arm64" ] && [ "$DEVICE_ARCH" = "arm64" ]; }; then
+            echo "Native arch build - QEMU will use KVM acceleration"
+            sudo apt install -y qemu-system-aarch64 qemu-efi-aarch64
+          else
+            echo "Cross-arch build - installing full QEMU emulation"
+            sudo apt install -y qemu-system-aarch64 qemu-efi-aarch64
+          fi
+
+      - name: Stage 1 - Download and prepare for ${{ matrix.image }}
+        run: |
+          ./bin/autobuild --image "${{ matrix.image }}" --stage 1
+
+      - name: Stage 2 - QEMU setup for ${{ matrix.image }}
+        run: |
+          ./bin/autobuild --image "${{ matrix.image }}" --stage 2
+        timeout-minutes: 60
+
+      - name: Clean up unnecessary files before upload
+        run: |
+          # Keep only the files needed for output stage
+          echo "Files before cleanup:"
+          ls -lh *.img *.raw 2>/dev/null || true
+
+          # Remove setup.iso if it exists (not needed after stage 2)
+          rm -f setup.iso
+
+          # Remove downloaded base image (already copied to work-image.raw)
+          find . -maxdepth 1 -name "*.qcow2" -delete
+
+          echo ""
+          echo "Files after cleanup (ready for upload):"
+          ls -lh *.img *.raw 2>/dev/null || true
+
+      - name: Upload work image and device-specific files
+        uses: actions/upload-artifact@v5
+        with:
+          name: images-ready-${{ steps.artifact.outputs.name }}
+          path: |
+            work-image.raw
+            *.img
+          retention-days: 1
+          compression-level: 0
+
+  # Job 3: Create Release (runs in parallel with build stages)
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.release_info.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # Fetch all history for changelog generation
+
+      - name: Determine build type
+        id: build_type
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "type=cron" >> $GITHUB_OUTPUT
+            echo "🕐 Cron build detected - will create/update daily release"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "type=push" >> $GITHUB_OUTPUT
+            echo "📝 Push build detected - will create new release with changelog"
+          else
+            echo "type=manual" >> $GITHUB_OUTPUT
+            echo "🔧 Manual build detected - will create new release"
+          fi
+
+      - name: Generate release name and tag
+        id: release_info
+        run: |
+          RELEASE_DATE=$(date +'%Y-%m-%d')
+          RELEASE_TIME=$(date +'%H%M')
+
+          # Determine if it's a pre-release
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            IS_PRERELEASE="false"
+          else
+            IS_PRERELEASE="true"
+          fi
+
+          # For cron builds, use fixed daily tag
+          if [ "${{ steps.build_type.outputs.type }}" = "cron" ]; then
+            if [ "$IS_PRERELEASE" = "true" ]; then
+              RELEASE_TAG="daily-${RELEASE_DATE}-${{ github.ref_name }}"
+              RELEASE_NAME="Daily Build ${RELEASE_DATE} (${{ github.ref_name }})"
+            else
+              RELEASE_TAG="daily-${RELEASE_DATE}"
+              RELEASE_NAME="Daily Build ${RELEASE_DATE}"
+            fi
+          else
+            # For push/manual builds, use timestamp tag
+            if [ "$IS_PRERELEASE" = "false" ]; then
+              RELEASE_TAG="v${RELEASE_DATE}-${RELEASE_TIME}"
+              RELEASE_NAME="Release ${RELEASE_DATE}"
+            else
+              RELEASE_TAG="v${RELEASE_DATE}-${RELEASE_TIME}-${{ github.ref_name }}"
+              RELEASE_NAME="Pre-release ${RELEASE_DATE} (${{ github.ref_name }})"
+            fi
+          fi
+
+          echo "tag=${RELEASE_TAG}" >> $GITHUB_OUTPUT
+          echo "name=${RELEASE_NAME}" >> $GITHUB_OUTPUT
+          echo "prerelease=${IS_PRERELEASE}" >> $GITHUB_OUTPUT
+          echo "date=${RELEASE_DATE}" >> $GITHUB_OUTPUT
+          echo "time=${RELEASE_TIME}" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog (for push builds)
+        if: steps.build_type.outputs.type == 'push'
+        id: changelog
+        run: |
+          # Get the last release tag
+          LAST_TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || echo "")
+
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous release found, generating full changelog"
+            CHANGELOG=$(git log --pretty=format:"- %s (%h) - %an" --no-merges)
+          else
+            echo "Generating changelog since $LAST_TAG"
+            CHANGELOG=$(git log ${LAST_TAG}..HEAD --pretty=format:"- %s (%h) - %an" --no-merges)
+          fi
+
+          # Save changelog to file
+          if [ -n "$CHANGELOG" ]; then
+            echo "### 📝 Changelog" > changelog.md
+            echo "" >> changelog.md
+            echo "$CHANGELOG" >> changelog.md
+            echo "" >> changelog.md
+          else
+            echo "### 📝 Changelog" > changelog.md
+            echo "" >> changelog.md
+            echo "No new commits since last release." >> changelog.md
+            echo "" >> changelog.md
+          fi
+
+          echo "Changelog generated:"
+          cat changelog.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create release body (push builds)
+        if: steps.build_type.outputs.type == 'push'
+        run: |
+          # Determine branch-specific header and warnings
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            cat > release_body.md << 'EOF'
+          ## 🚀 AstralEmu Images - ${{ steps.release_info.outputs.date }}
+
+          Multi-device emulation images (Raspberry Pi, Nintendo Switch, and more).
+
+          ### 📦 Available Images
+
+          Images are being built and will be uploaded as they complete.
+
+          EOF
+          elif [ "${{ github.ref_name }}" = "test" ]; then
+            cat > release_body.md << 'EOF'
+          ## 🧪 TEST BUILD - AstralEmu Images - ${{ steps.release_info.outputs.date }}
+
+          > **⚠️ WARNING - TEST BUILD**
+          >
+          > These images are from the `test` branch and are for testing purposes only.
+          > **NO GUARANTEE of functionality is provided.**
+          >
+          > - Do not use in production
+          > - May contain critical bugs
+          > - May not boot properly
+          > - Use at your own risk
+          >
+          > For stable images, check releases from the `main` branch.
+
+          Multi-device emulation images (Raspberry Pi, Nintendo Switch, and more).
+
+          ### 📦 Available Images
+
+          Images are being built and will be uploaded as they complete.
+
+          EOF
+          elif [ "${{ github.ref_name }}" = "preview" ]; then
+            cat > release_body.md << 'EOF'
+          ## 🔍 PREVIEW BUILD - AstralEmu Images - ${{ steps.release_info.outputs.date }}
+
+          > **ℹ️ Preview Build**
+          >
+          > These images are from the `preview` branch and are preview versions.
+          > They may contain experimental or in-development features.
+          >
+          > Test at your own risk. For stable versions, check releases from the `main` branch.
+
+          Multi-device emulation images (Raspberry Pi, Nintendo Switch, and more).
+
+          ### 📦 Available Images
+
+          Images are being built and will be uploaded as they complete.
+
+          EOF
+          fi
+
+          # Add changelog if it exists
+          if [ -f changelog.md ]; then
+            cat changelog.md >> release_body.md
+          fi
+
+          cat >> release_body.md << 'EOF'
+
+          ### 🔧 Build Info
+
+          - **Branch** : `${{ github.ref_name }}`
+          - **Commit** : `${{ github.sha }}`
+          - **Date** : `${{ steps.release_info.outputs.date }}`
+          - **Workflow** : [Build #${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          ### 📚 Documentation
+
+          See [README.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md) for more information.
+          EOF
+
+      - name: Create release body (cron/manual builds)
+        if: steps.build_type.outputs.type != 'push'
+        run: |
+          cat > release_body.md << 'EOF'
+          ## 🚀 AstralEmu Images - Daily Build
+
+          Multi-device emulation images (Raspberry Pi, Nintendo Switch, and more).
+
+          **🕐 Build started:** `${{ steps.release_info.outputs.date }}` at `${{ steps.release_info.outputs.time }}`
+
+          ### 📦 Available Images
+
+          Images are being built and will be uploaded as they complete.
+
+          ### 🔧 Build Info
+
+          - **Branch** : `${{ github.ref_name }}`
+          - **Last Commit** : `${{ github.sha }}`
+          - **Build Date** : `${{ steps.release_info.outputs.date }}` at `${{ steps.release_info.outputs.time }}`
+          - **Workflow** : [Build #${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          ### 📚 Documentation
+
+          See [README.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md) for more information.
+          EOF
+
+      - name: Delete existing release if exists (cron builds)
+        if: steps.build_type.outputs.type == 'cron'
+        run: |
+          # Delete existing release if it exists
+          if gh release view ${{ steps.release_info.outputs.tag }} >/dev/null 2>&1; then
+            echo "Deleting existing release ${{ steps.release_info.outputs.tag }}..."
+            gh release delete ${{ steps.release_info.outputs.tag }} --yes
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create release
+        id: create_release
+        run: |
+          PRERELEASE_FLAG=""
+          if [ "${{ steps.release_info.outputs.prerelease }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          gh release create ${{ steps.release_info.outputs.tag }} \
+            --title "${{ steps.release_info.outputs.name }}" \
+            --notes-file release_body.md \
+            $PRERELEASE_FLAG
+
+          echo "✅ Release ${{ steps.release_info.outputs.tag }} created successfully"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Job 4: Stage 3 - Run output format modules + upload (parallel for all images)
+  stage3-output:
+    needs: [detect-images, stage1-2-download-qemu, create-release]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    strategy:
+      matrix: ${{ fromJSON(needs.detect-images.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Generate sanitized artifact name
+        id: artifact
+        run: |
+          # Replace / and + with - for artifact names
+          SANITIZED=$(echo "${{ matrix.image }}" | tr '/+' '--')
+          echo "name=${SANITIZED}" >> $GITHUB_OUTPUT
+
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            parted \
+            e2fsprogs \
+            dosfstools \
+            rsync \
+            qemu-utils \
+            squashfs-tools \
+            xz-utils
+
+          # Install yq
+          ARCH=$(dpkg --print-architecture)
+          sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}"
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Enable loop devices
+        run: |
+          # Load loop module
+          sudo modprobe loop
+          # Check available loop devices
+          ls -la /dev/loop* || true
+
+      - name: Download images from stage 1+2
+        uses: actions/download-artifact@v6
+        with:
+          name: images-ready-${{ steps.artifact.outputs.name }}
+
+      - name: Stage 3 - Run output format for ${{ matrix.image }}
+        run: |
+          ./bin/autobuild --image "${{ matrix.image }}" --stage 3
+
+      - name: Upload to release
+        run: |
+          # Upload all output artifacts (*.img.xz for rpi, *.tar.gz or *.7z for hekate, etc.)
+          UPLOADED=0
+          for f in *.img.xz *.tar.gz *.7z; do
+            if [ -f "$f" ]; then
+              gh release upload ${{ needs.create-release.outputs.tag }} "$f" --clobber
+              echo "✅ Uploaded $f to release"
+              UPLOADED=$((UPLOADED + 1))
+            fi
+          done
+
+          if [ "$UPLOADED" -eq 0 ]; then
+            echo "WARNING: No output files found to upload"
+            ls -la
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup
+        if: always()
+        run: |
+          # Clean up large files
+          sudo rm -f *.img *.img.xz *.raw *.squashfs *.tar.gz *.7z
+          df -h
+
+  # Job 5: Cleanup empty release (runs after all builds complete or fail)
+  cleanup-release:
+    needs: [create-release, stage3-output]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Check release and delete if empty
+        run: |
+          RELEASE_TAG="${{ needs.create-release.outputs.tag }}"
+
+          echo "Checking release $RELEASE_TAG for assets..."
+
+          # Get asset count from release
+          ASSET_COUNT=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length' 2>/dev/null || echo "0")
+
+          echo "Release has $ASSET_COUNT asset(s)"
+
+          if [ "$ASSET_COUNT" -eq 0 ]; then
+            echo "⚠️ Release $RELEASE_TAG is empty (no assets uploaded)"
+            echo "Deleting empty release..."
+            gh release delete "$RELEASE_TAG" --yes
+            echo "✅ Empty release deleted successfully"
+          else
+            echo "✅ Release $RELEASE_TAG has $ASSET_COUNT asset(s), keeping it"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,21 @@
+[Unit]
+Description=Homefs Dynamic Expansion Service
+Documentation=file:///usr/share/doc/switch-linux/homefs.md
+After=local-fs.target
+Requires=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/homefs-expand-daemon.sh
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+ProtectSystem=false
+ProtectHome=false
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target

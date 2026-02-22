@@ -1,0 +1,23 @@
+packages:
+  apt:
+    - kodi
+    - kodi-inputstream-adaptive
+    - kodi-inputstream-ffmpegdirect
+    - kodi-visualization-spectrum
+    - kodi-audiodecoder-fluidsynth
+    - kodi-pvr-iptvsimple
+    - kodi-wayland
+  fedora:
+    - kodi
+    - kodi-inputstream-adaptive
+    - kodi-inputstream-ffmpegdirect
+    - kodi-visualization-spectrum
+    - kodi-audiodecoder-fluidsynth
+    - kodi-pvr-iptvsimple
+  arch:
+    - kodi-wayland
+    - kodi-addon-inputstream-adaptive
+    - kodi-addon-inputstream-ffmpegdirect
+    - kodi-addon-visualization-spectrum
+    - kodi-addon-audiodecoder-fluidsynth
+    - kodi-addon-pvr-iptvsimple

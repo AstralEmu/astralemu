@@ -1,0 +1,281 @@
+#!/bin/sh
+#
+# Switch Linux initramfs init script
+# Main entry point (PID 1) - orchestrates boot process
+#
+
+# Mount essential filesystems
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+# Create loop device nodes
+for i in 0 1 2 3 4 5 6 7 8 9; do
+    mknod -m 660 /dev/loop$i b 7 $i 2>/dev/null || true
+done
+for i in 10 11 12 13 14 15 16 17 18 19 20; do
+    mknod -m 660 /dev/loop$i b 7 $i 2>/dev/null || true
+done
+
+# Parse kernel command line
+IMAGE_NAME="switch-linux"
+DEBUG=false
+
+for param in $(cat /proc/cmdline); do
+    case $param in
+        swlinux.image=*)
+            IMAGE_NAME="${param#swlinux.image=}"
+            ;;
+        swlinux.debug*)
+            DEBUG=true
+            ;;
+    esac
+done
+
+log() {
+    echo "[initramfs] $1"
+}
+
+error() {
+    echo "[initramfs] ERROR: $1"
+    if $DEBUG; then
+        echo "Dropping to shell for debugging..."
+        exec /bin/sh
+    fi
+    sleep 5
+}
+
+log "=========================================="
+log "       Switch Linux Initramfs"
+log "=========================================="
+log "Image: $IMAGE_NAME"
+log "Debug: $DEBUG"
+
+# Source modular scripts if available
+SCRIPTS_DIR="/scripts"
+
+# =============================================================================
+# MOUNT SD CARD
+# =============================================================================
+
+log "--- Mounting SD card ---"
+
+if [ -f "$SCRIPTS_DIR/mount-sd.sh" ]; then
+    . "$SCRIPTS_DIR/mount-sd.sh" /sd
+else
+    # Inline fallback
+    SD_DEV=""
+    for i in $(seq 1 30); do
+        for dev in /dev/mmcblk0p1 /dev/mmcblk1p1 /dev/sda1; do
+            if [ -b "$dev" ]; then
+                SD_DEV="$dev"
+                break 2
+            fi
+        done
+        sleep 0.2
+    done
+
+    if [ -z "$SD_DEV" ]; then
+        error "SD card not found!"
+        exec /bin/sh
+    fi
+
+    log "Found SD card: $SD_DEV"
+    mount -t vfat -o rw,utf8 "$SD_DEV" /sd
+fi
+
+if [ $? -ne 0 ]; then
+    error "Failed to mount SD card!"
+    exec /bin/sh
+fi
+
+# Check image directory exists
+IMAGE_DIR="/sd/linux_img/$IMAGE_NAME"
+if [ ! -d "$IMAGE_DIR" ]; then
+    error "Image directory not found: $IMAGE_DIR"
+    log "Available images:"
+    ls -la /sd/linux_img/ 2>/dev/null || true
+    exec /bin/sh
+fi
+
+log "Image directory: $IMAGE_DIR"
+
+# =============================================================================
+# MOUNT ROOTFS (squashfs)
+# =============================================================================
+
+log "--- Mounting rootfs ---"
+
+if [ -f "$SCRIPTS_DIR/mount-rootfs.sh" ]; then
+    . "$SCRIPTS_DIR/mount-rootfs.sh" "$IMAGE_DIR" /rootfs
+else
+    # Inline fallback
+    ROOTFS_DIR="$IMAGE_DIR/rootfs"
+    PARTS=$(ls "$ROOTFS_DIR"/*.part* 2>/dev/null | sort)
+    PART_COUNT=$(echo "$PARTS" | wc -w)
+
+    if [ "$PART_COUNT" -eq 0 ]; then
+        error "No rootfs parts found in $ROOTFS_DIR"
+        exec /bin/sh
+    fi
+
+    log "Found $PART_COUNT rootfs part(s)"
+
+    if [ "$PART_COUNT" -eq 1 ]; then
+        SINGLE_PART=$(echo "$PARTS" | head -1)
+        /sbin/losetup /dev/loop0 "$SINGLE_PART"
+        ROOTFS_DEV="/dev/loop0"
+    else
+        LOOP_NUM=0
+        DM_TABLE=""
+        OFFSET=0
+
+        for PART in $PARTS; do
+            LOOP_DEV="/dev/loop$LOOP_NUM"
+            /sbin/losetup "$LOOP_DEV" "$PART"
+            SIZE_BYTES=$(stat -c %s "$PART")
+            SIZE_SECTORS=$((SIZE_BYTES / 512))
+
+            if [ -n "$DM_TABLE" ]; then
+                DM_TABLE="$DM_TABLE
+"
+            fi
+            DM_TABLE="${DM_TABLE}${OFFSET} ${SIZE_SECTORS} linear ${LOOP_DEV} 0"
+            OFFSET=$((OFFSET + SIZE_SECTORS))
+            LOOP_NUM=$((LOOP_NUM + 1))
+        done
+
+        echo "$DM_TABLE" | /sbin/dmsetup create rootfs-combined
+        ROOTFS_DEV="/dev/mapper/rootfs-combined"
+    fi
+
+    mkdir -p /rootfs
+    mount -t squashfs -o ro "$ROOTFS_DEV" /rootfs
+fi
+
+if [ $? -ne 0 ]; then
+    error "Failed to mount rootfs!"
+    exec /bin/sh
+fi
+
+# =============================================================================
+# MOUNT HOMEFS (ext4, expandable)
+# =============================================================================
+
+log "--- Mounting homefs ---"
+
+if [ -f "$SCRIPTS_DIR/mount-homefs.sh" ]; then
+    . "$SCRIPTS_DIR/mount-homefs.sh" "$IMAGE_DIR" /rootfs/home
+else
+    # Inline fallback
+    HOMEFS_DIR="$IMAGE_DIR/homefs"
+    mkdir -p "$HOMEFS_DIR"
+
+    PARTS=$(ls "$HOMEFS_DIR"/*.part* 2>/dev/null | sort)
+    PART_COUNT=$(echo "$PARTS" | wc -w)
+    LOOP_START=10
+
+    if [ "$PART_COUNT" -eq 0 ]; then
+        log "Creating initial homefs partition..."
+        FIRST_PART="$HOMEFS_DIR/homefs.ext4.part000"
+        dd if=/dev/zero of="$FIRST_PART" bs=1M count=0 seek=1900 2>/dev/null
+        PARTS="$FIRST_PART"
+        PART_COUNT=1
+    fi
+
+    log "Found $PART_COUNT homefs part(s)"
+
+    if [ "$PART_COUNT" -eq 1 ]; then
+        SINGLE_PART=$(echo "$PARTS" | head -1)
+        /sbin/losetup /dev/loop$LOOP_START "$SINGLE_PART"
+        HOMEFS_DEV="/dev/loop$LOOP_START"
+    else
+        LOOP_NUM=$LOOP_START
+        DM_TABLE=""
+        OFFSET=0
+
+        for PART in $PARTS; do
+            LOOP_DEV="/dev/loop$LOOP_NUM"
+            /sbin/losetup "$LOOP_DEV" "$PART"
+            SIZE_BYTES=$(stat -c %s "$PART")
+            SIZE_SECTORS=$((SIZE_BYTES / 512))
+
+            if [ -n "$DM_TABLE" ]; then
+                DM_TABLE="$DM_TABLE
+"
+            fi
+            DM_TABLE="${DM_TABLE}${OFFSET} ${SIZE_SECTORS} linear ${LOOP_DEV} 0"
+            OFFSET=$((OFFSET + SIZE_SECTORS))
+            LOOP_NUM=$((LOOP_NUM + 1))
+        done
+
+        echo "$DM_TABLE" | /sbin/dmsetup create homefs-combined
+        HOMEFS_DEV="/dev/mapper/homefs-combined"
+    fi
+
+    mkdir -p /rootfs/home
+    mount -t ext4 "$HOMEFS_DEV" /rootfs/home
+
+    # Save info for expansion daemon
+    mkdir -p /rootfs/run
+    cat > /rootfs/run/homefs-info << EOF
+HOMEFS_DIR=$HOMEFS_DIR
+LOOP_START=$LOOP_START
+PART_COUNT=$PART_COUNT
+HOMEFS_DEV=$HOMEFS_DEV
+EOF
+fi
+
+if [ $? -ne 0 ]; then
+    error "Failed to mount homefs!"
+    exec /bin/sh
+fi
+
+# =============================================================================
+# SETUP OVERLAYS (/etc, /var)
+# =============================================================================
+
+log "--- Setting up overlays ---"
+
+if [ -f "$SCRIPTS_DIR/setup-overlays.sh" ]; then
+    . "$SCRIPTS_DIR/setup-overlays.sh" /rootfs /rootfs/home
+else
+    # Inline fallback
+    OVERLAY_BASE="/rootfs/home/.overlays"
+    mkdir -p "$OVERLAY_BASE/etc/upper" "$OVERLAY_BASE/etc/work"
+    mkdir -p "$OVERLAY_BASE/var/upper" "$OVERLAY_BASE/var/work"
+
+    mount -t overlay overlay \
+        -o "lowerdir=/rootfs/etc,upperdir=$OVERLAY_BASE/etc/upper,workdir=$OVERLAY_BASE/etc/work" \
+        /rootfs/etc
+
+    mount -t overlay overlay \
+        -o "lowerdir=/rootfs/var,upperdir=$OVERLAY_BASE/var/upper,workdir=$OVERLAY_BASE/var/work" \
+        /rootfs/var
+fi
+
+# =============================================================================
+# MOUNT SD CARD IN FINAL SYSTEM
+# =============================================================================
+
+log "--- Moving SD mount to final system ---"
+mkdir -p /rootfs/sd
+mount --move /sd /rootfs/sd
+
+# =============================================================================
+# SWITCH ROOT
+# =============================================================================
+
+log "--- Switching to real root filesystem ---"
+log "=========================================="
+
+# Cleanup
+umount /proc
+umount /sys
+
+# Switch root to the assembled filesystem
+exec switch_root /rootfs /sbin/init
+
+# If switch_root fails
+error "switch_root failed!"
+exec /bin/sh

@@ -1,0 +1,63 @@
+packages:
+  apt:
+    - curl
+    - wget
+    - sudo
+    - openssh-server
+    - ca-certificates
+    - gnupg
+    - network-manager
+    - systemd
+    - iw
+  debian:
+    - raspberrypi-archive-keyring
+    - linux-image-rpi-2712
+    - linux-headers-rpi-2712
+    - raspi-firmware
+    - firmware-brcm80211
+    - firmware-realtek
+    - firmware-ralink
+    - firmware-atheros
+    - firmware-misc-nonfree
+    - firmware-iwlwifi
+    - wpasupplicant
+    - wireless-tools
+  ubuntu:
+    - linux-raspi
+    - linux-firmware-raspi
+    - linux-firmware
+  fedora:
+    - curl
+    - wget
+    - sudo
+    - openssh-server
+    - ca-certificates
+    - gnupg2
+    - NetworkManager
+    - systemd
+    - kernel
+    - kernel-modules
+    - kernel-modules-extra
+    - bcm2711-firmware
+    - bcm283x-overlays
+    - brcmfmac-firmware
+    - linux-firmware
+    - wpa_supplicant
+    - iw
+  arch:
+    - curl
+    - wget
+    - sudo
+    - openssh
+    - ca-certificates
+    - gnupg
+    - networkmanager
+    - systemd
+    - linux-rpi
+    - linux-rpi-headers
+    - raspberrypi-bootloader
+    - firmware-raspberrypi
+    - linux-firmware
+    - wpa_supplicant
+    - wireless_tools
+    - iw
