@@ -11,6 +11,10 @@ set -e
 WORKDIR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$WORKDIR_ROOT"
 
+# Remote devices.yml from astralemu-packages (source of truth for power scores)
+PACKAGES_DEVICES_URL="https://raw.githubusercontent.com/AstralEmu/astralemu-packages/refs/heads/main/devices.yml"
+PACKAGES_DEVICES_CACHE=""
+
 # Working image name (used during QEMU phase)
 WORK_IMAGE="work-image.raw"
 
@@ -54,6 +58,28 @@ get_distro_field() {
     yq ".devices[] | select(.id == \"$device_id\") | .distros[] | select(.id == \"$distro_id\") | $field" "$WORKDIR_ROOT/devices.yml"
 }
 
+# Fetch device power score from astralemu-packages (source of truth)
+# Uses pkg_device_id to look up the power field in the remote devices.yml
+fetch_device_power() {
+    local pkg_id="$1"
+
+    # Download and cache remote devices.yml on first call
+    if [ -z "$PACKAGES_DEVICES_CACHE" ] || [ ! -f "$PACKAGES_DEVICES_CACHE" ]; then
+        PACKAGES_DEVICES_CACHE=$(mktemp -t astralemu-packages-devices.XXXXXX)
+        wget -q "$PACKAGES_DEVICES_URL" -O "$PACKAGES_DEVICES_CACHE"
+    fi
+
+    local power
+    power=$(yq ".devices[] | select(.id == \"$pkg_id\") | .power" "$PACKAGES_DEVICES_CACHE")
+
+    if [ -z "$power" ] || [ "$power" = "null" ]; then
+        echo_error "Device power not found for pkg_device_id '$pkg_id' in astralemu-packages"
+        exit 1
+    fi
+
+    echo "$power"
+}
+
 # Colors for display
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -92,11 +118,12 @@ list_images() {
     device_count=$(yq '.devices | length' "$WORKDIR_ROOT/devices.yml")
 
     for i in $(seq 0 $((device_count - 1))); do
-        local dev_id dev_name dev_power dev_arch
+        local dev_id dev_name dev_arch dev_pkg_id dev_power
         dev_id=$(yq ".devices[$i].id" "$WORKDIR_ROOT/devices.yml")
         dev_name=$(yq ".devices[$i].name" "$WORKDIR_ROOT/devices.yml")
-        dev_power=$(yq ".devices[$i].power" "$WORKDIR_ROOT/devices.yml")
         dev_arch=$(yq ".devices[$i].arch" "$WORKDIR_ROOT/devices.yml")
+        dev_pkg_id=$(yq ".devices[$i].pkg_device_id" "$WORKDIR_ROOT/devices.yml")
+        dev_power=$(fetch_device_power "$dev_pkg_id")
 
         echo "  $dev_id  ($dev_name, power=$dev_power, arch=$dev_arch)"
 
@@ -236,10 +263,12 @@ load_image_config() {
     fi
 
     # Load device fields from devices.yml
-    DEVICE_POWER=$(get_device_field "$DEVICE_ID" ".power")
     DEVICE_ARCH=$(get_device_field "$DEVICE_ID" ".arch")
     DEVICE_USER=$(get_device_field "$DEVICE_ID" ".user")
     PKG_DEVICE_ID=$(get_device_field "$DEVICE_ID" ".pkg_device_id")
+
+    # Fetch power score from astralemu-packages (source of truth)
+    DEVICE_POWER=$(fetch_device_power "$PKG_DEVICE_ID")
 
     # DATA_ROOT defaults to /home/$DEVICE_USER if not specified in devices.yml
     DATA_ROOT=$(get_device_field "$DEVICE_ID" ".data_root")
@@ -493,6 +522,11 @@ compute_build_fingerprint() {
 
     # Device config.sh
     [ -f "devices/$DEVICE_ID/config.sh" ] && hash_input+=$(sha256sum "devices/$DEVICE_ID/config.sh" | cut -d' ' -f1)
+
+    # Remote devices.yml from astralemu-packages (power scores affect emulator selection)
+    if [ -n "$PACKAGES_DEVICES_CACHE" ] && [ -f "$PACKAGES_DEVICES_CACHE" ]; then
+        hash_input+=$(sha256sum "$PACKAGES_DEVICES_CACHE" | cut -d' ' -f1)
+    fi
 
     echo "$hash_input" | sha256sum | cut -d' ' -f1
 }

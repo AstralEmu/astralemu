@@ -9,7 +9,6 @@
 #   id            - Identifiant (utilise partout : noms d'images, repos, dossiers)
 #   name          - Nom lisible
 #   arch          - Architecture (arm64, amd64)
-#   power         - Score de puissance 1-5 (filtre les emulateurs trop lourds)
 #   user          - Nom d'utilisateur systeme (ex: pi, switch)
 #                   Source de verite unique : cloud-init est genere depuis ce champ
 #   data_root     - Racine des donnees utilisateur (optionnel, defaut: /home/<user>)
@@ -37,7 +36,6 @@ devices:
   - id: rpi4
     name: "Raspberry Pi 4 (Cortex-A72)"
     arch: arm64
-    power: 2
     user: pi
     pkg_device_id: rpi4
     runner: ubuntu-24.04-arm
@@ -101,7 +99,6 @@ devices:
   - id: rpi5
     name: "Raspberry Pi 5 (Cortex-A76)"
     arch: arm64
-    power: 4
     user: pi
     pkg_device_id: armv8-2
     runner: ubuntu-24.04-arm
@@ -165,7 +162,6 @@ devices:
   - id: switch
     name: "Nintendo Switch (Tegra X1)"
     arch: arm64
-    power: 3
     user: switch
     data_root: "/sd"
     pkg_device_id: l4t

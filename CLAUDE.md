@@ -103,7 +103,7 @@ Set by `bin/autobuild` and exported before service scripts run:
 
 ### Device Configuration
 
-`devices.yml` is the central config defining all devices with QEMU settings, power scores, output formats, distros, and APT repos. Each device also has:
+`devices.yml` is the central config defining all devices with QEMU settings, output formats, distros, and repos. Power scores are fetched at build time from `astralemu-packages` via `pkg_device_id`. Each device also has:
 
 - `devices/<id>/config.sh` — Device-specific shell variables NOT in devices.yml (e.g. `RASPIOS_URL`, partition sizes, compression settings). Sourced by autobuild and appended to the temp config
 - `devices/<id>/cloudinit/` — Optional meta-data/user-data templates (autobuild now generates user-data from `DEVICE_USER`)
@@ -119,7 +119,7 @@ Adding a new format: create `output_formats/<name>/build.sh` with `output_<name>
 
 ## Adding a New Device
 
-1. Add entry in `devices.yml` (id, name, arch, power, user, pkg_device_id, runner, qemu, output, distros with repos)
+1. Add entry in `devices.yml` (id, name, arch, user, pkg_device_id, runner, qemu, output, distros with repos)
 2. Create `devices/<id>/config.sh` with device-specific variables
 3. Create `devices/<id>/services/base/setup.sh` for kernel/firmware/drivers
 4. Create `devices/<id>/services/base/setupfiles/services-first-boot.sh` and `.service`

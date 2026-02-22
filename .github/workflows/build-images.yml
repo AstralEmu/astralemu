@@ -110,6 +110,11 @@ jobs:
             sudo apt install -y qemu-system-aarch64 qemu-efi-aarch64
           fi
 
+      - name: Fetch astralemu-packages device definitions
+        run: |
+          wget -q "https://raw.githubusercontent.com/AstralEmu/astralemu-packages/refs/heads/main/devices.yml" -O .packages-devices.yml
+          echo "Remote devices.yml fetched (power scores for cache invalidation)"
+
       - name: Cache base images
         uses: actions/cache@v4
         with:
@@ -127,7 +132,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: work-image.raw
-          key: work-image-${{ steps.artifact.outputs.name }}-${{ hashFiles('devices.yml', 'bin/autobuild', 'devices/**/setup.sh', 'devices/**/packages.yml', 'devices/**/config.sh', 'services/**/setup.sh', 'services/**/packages.yml') }}
+          key: work-image-${{ steps.artifact.outputs.name }}-${{ hashFiles('devices.yml', 'bin/autobuild', '.packages-devices.yml', 'devices/**/setup.sh', 'devices/**/packages.yml', 'devices/**/config.sh', 'services/**/setup.sh', 'services/**/packages.yml') }}
 
       - name: Full build - Stage 1+2 (cache miss)
         if: steps.cache-work.outputs.cache-hit != 'true'
@@ -147,7 +152,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: work-image.raw
-          key: work-image-${{ steps.artifact.outputs.name }}-${{ hashFiles('devices.yml', 'bin/autobuild', 'devices/**/setup.sh', 'devices/**/packages.yml', 'devices/**/config.sh', 'services/**/setup.sh', 'services/**/packages.yml') }}
+          key: work-image-${{ steps.artifact.outputs.name }}-${{ hashFiles('devices.yml', 'bin/autobuild', '.packages-devices.yml', 'devices/**/setup.sh', 'devices/**/packages.yml', 'devices/**/config.sh', 'services/**/setup.sh', 'services/**/packages.yml') }}
 
       - name: Clean up unnecessary files before upload
         if: ${{ !cancelled() }}
