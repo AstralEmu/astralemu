@@ -9,10 +9,10 @@
 # See ./bin/autobuild --list-images for available devices/services
 
 # Raspberry Pi 4
-rpi4/default+emulations
+rpi4/debian/emulations+desktop+kodi
 
 # Raspberry Pi 5
-rpi5/default+emulations
+rpi5/debian/emulations+android+desktop+kodi
 
 # Nintendo Switch
-switch/default+emulations
+switch/ubuntu/emulations+android+tabs+kodi

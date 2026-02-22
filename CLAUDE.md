@@ -28,6 +28,9 @@ AstralEmu is a unified multi-device Linux emulation distribution image builder. 
 # Skip stages (resume from existing work)
 ./bin/autobuild --image rpi4/default+emulations --skip-download
 ./bin/autobuild --image rpi4/default+emulations --skip-qemu
+
+# Upgrade only (skip full build, just upgrade packages in cached work-image via chroot)
+./bin/autobuild --image rpi4/default+emulations --upgrade-only
 ```
 
 ### Image Name Format
@@ -131,10 +134,11 @@ Adding a new format: create `output_formats/<name>/build.sh` with `output_<name>
 
 ## GitHub Actions CI/CD
 
-- **Triggers**: Push to main/test/preview, daily at 2:00 UTC, manual dispatch
+- **Triggers**: Weekly Thursday 4AM UTC (after package builds Sun/Wed), manual dispatch
 - **Matrix**: Auto-generated from `.github/images.txt` + runner from `devices.yml`
 - **Pipeline**: detect-images -> stage1-2 (parallel per image) -> create-release -> stage3-output (parallel) -> cleanup-release
 - **Releases**: main -> stable, test/preview -> pre-releases, empty releases auto-deleted
+- **Cache**: Base images cached by `devices.yml` hash. Work-images cached by build fingerprint (`hashFiles` on autobuild, setup.sh, packages.yml, config.sh). Cache hit = `--upgrade-only` (chroot pkg upgrade), cache miss = full build (stage 1+2)
 
 ## Technical Notes
 

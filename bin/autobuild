@@ -460,6 +460,110 @@ detect_boot_mode() {
     fi
 }
 
+# Compute build fingerprint from all identity files
+compute_build_fingerprint() {
+    local img_name="$1"
+    local hash_input=""
+
+    # devices.yml
+    hash_input+=$(sha256sum "$WORKDIR_ROOT/devices.yml" | cut -d' ' -f1)
+
+    # autobuild script
+    hash_input+=$(sha256sum "$WORKDIR_ROOT/bin/autobuild" | cut -d' ' -f1)
+
+    # All service files for this image (setup.sh + packages.yml + depends.sh)
+    for service in $SERVICES; do
+        local service_path
+        service_path=$(resolve_service_path "$DEVICE_ID" "$service")
+        if [ -n "$service_path" ]; then
+            for f in "$service_path/setup.sh" "$service_path/packages.yml" "$service_path/depends.sh"; do
+                [ -f "$f" ] && hash_input+=$(sha256sum "$f" | cut -d' ' -f1)
+            done
+        fi
+    done
+
+    # prepare service (always included via concatenation)
+    local prepare_path
+    prepare_path=$(resolve_service_path "$DEVICE_ID" "prepare")
+    if [ -n "$prepare_path" ]; then
+        for f in "$prepare_path/setup.sh" "$prepare_path/packages.yml"; do
+            [ -f "$f" ] && hash_input+=$(sha256sum "$f" | cut -d' ' -f1)
+        done
+    fi
+
+    # Device config.sh
+    [ -f "devices/$DEVICE_ID/config.sh" ] && hash_input+=$(sha256sum "devices/$DEVICE_ID/config.sh" | cut -d' ' -f1)
+
+    echo "$hash_input" | sha256sum | cut -d' ' -f1
+}
+
+# Upgrade packages in cached work-image via chroot (no QEMU)
+run_upgrade_only() {
+    local img_name="$1"
+
+    echo_step "Upgrading packages in cached work-image (chroot)..."
+
+    if [ ! -f "$WORK_IMAGE" ]; then
+        echo_error "--upgrade-only requires existing work-image.raw"
+        exit 1
+    fi
+
+    LOOP_DEV=$(sudo losetup -fP --show "$WORK_IMAGE")
+
+    # Find rootfs partition
+    ROOT_PART=""
+    for part in ${LOOP_DEV}p*; do
+        if [ -b "$part" ]; then
+            FS_TYPE=$(sudo blkid -s TYPE -o value "$part" 2>/dev/null || true)
+            if [ "$FS_TYPE" = "ext4" ]; then
+                ROOT_PART="$part"
+                break
+            fi
+        fi
+    done
+
+    if [ -z "$ROOT_PART" ]; then
+        echo_error "Cannot find ext4 rootfs in work-image"
+        sudo losetup -d "$LOOP_DEV"
+        exit 1
+    fi
+
+    MOUNT_DIR=$(mktemp -d)
+    sudo mount "$ROOT_PART" "$MOUNT_DIR"
+
+    # Setup chroot environment
+    sudo mount --bind /proc "$MOUNT_DIR/proc"
+    sudo mount --bind /sys "$MOUNT_DIR/sys"
+    sudo mount --bind /dev "$MOUNT_DIR/dev"
+    sudo mount --bind /dev/pts "$MOUNT_DIR/dev/pts"
+    sudo cp /etc/resolv.conf "$MOUNT_DIR/etc/resolv.conf"
+
+    # Detect package manager and upgrade
+    sudo chroot "$MOUNT_DIR" /bin/bash -c '
+        export DEBIAN_FRONTEND=noninteractive
+        if command -v apt &>/dev/null; then
+            apt update && apt upgrade -y && apt autoremove -y --purge && apt clean
+            rm -rf /var/lib/apt/lists/*
+        elif command -v dnf &>/dev/null; then
+            dnf upgrade -y && dnf autoremove -y && dnf clean all
+        elif command -v pacman &>/dev/null; then
+            pacman -Syu --noconfirm && pacman -Sc --noconfirm
+        fi
+        date > /root/upgrade-completed
+    '
+
+    # Cleanup chroot mounts
+    sudo umount "$MOUNT_DIR/dev/pts" 2>/dev/null || true
+    sudo umount "$MOUNT_DIR/dev" 2>/dev/null || true
+    sudo umount "$MOUNT_DIR/sys" 2>/dev/null || true
+    sudo umount "$MOUNT_DIR/proc" 2>/dev/null || true
+    sudo umount "$MOUNT_DIR"
+    sudo losetup -d "$LOOP_DEV"
+    rm -rf "$MOUNT_DIR"
+
+    echo_success "Package upgrade completed"
+}
+
 # Inject first-boot service into distro image (for CLOUD=false)
 inject_firstboot_service() {
     local IMG_NAME="$1"
@@ -1296,7 +1400,15 @@ EOF
 
     load_image_config "$img_name"
 
-    if [ "$BUILD_FORMAT" = "docker" ]; then
+    # Display build fingerprint
+    BUILD_FINGERPRINT=$(compute_build_fingerprint "$img_name")
+    echo "  Build fingerprint: $BUILD_FINGERPRINT"
+
+    if [ "$UPGRADE_ONLY" = true ]; then
+        # Upgrade-only path: chroot pkg_upgrade on cached work-image
+        echo_step "=== UPGRADE ONLY ==="
+        run_upgrade_only "$img_name"
+    elif [ "$BUILD_FORMAT" = "docker" ]; then
         # Ublue/OCI build path — no QEMU, no cloud-init
         if [ "$STAGE" = "all" ] || [ "$STAGE" = "1" ] || [ "$STAGE" = "2" ]; then
             echo_step "=== OCI BUILD (ublue) ==="
@@ -1415,6 +1527,7 @@ Options:
 
     --skip-download     Don't download base images
     --skip-qemu         Don't launch QEMU (use existing work image)
+    --upgrade-only      Skip full build, just upgrade packages in cached work-image
 
     --help              Display this help
 
@@ -1449,6 +1562,7 @@ EOF
 # Parse arguments
 SKIP_DOWNLOAD=false
 SKIP_QEMU=false
+UPGRADE_ONLY=false
 IMAGE_NAME=""
 
 while [[ $# -gt 0 ]]; do
@@ -1479,6 +1593,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-qemu)
             SKIP_QEMU=true
+            shift
+            ;;
+        --upgrade-only)
+            UPGRADE_ONLY=true
             shift
             ;;
         --help|-h)
