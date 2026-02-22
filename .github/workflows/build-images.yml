@@ -1,24 +1,10 @@
 name: Build AstralEmu Images
 
 on:
-  push:
-    branches:
-      - main
-      - test
-      - preview
-    paths:
-      - '.github/workflows/build-images.yml'
-      - '.github/images.txt'
-      - 'devices/**'
-      - 'services/**'
-      - 'bin/**'
-      - 'output_formats/**'
-      - 'devices.yml'
   schedule:
-    # Daily build at 2:00 AM UTC
-    - cron: '0 2 * * *'
+    # Weekly build on Thursday 4AM UTC (after package builds on Sun/Wed)
+    - cron: '0 4 * * 4'
   workflow_dispatch:
-    # Allows manual trigger
 
 env:
   DEBIAN_FRONTEND: noninteractive
@@ -134,6 +120,7 @@ jobs:
         timeout-minutes: 60
 
       - name: Clean up unnecessary files before upload
+        if: ${{ !cancelled() }}
         run: |
           # Keep only the files needed for output stage
           echo "Files before cleanup:"
@@ -150,6 +137,7 @@ jobs:
           ls -lh *.img *.raw 2>/dev/null || true
 
       - name: Upload work image and device-specific files
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v5
         with:
           name: images-ready-${{ steps.artifact.outputs.name }}
@@ -392,6 +380,7 @@ jobs:
   # Job 4: Stage 3 - Run output format modules + upload (parallel for all images)
   stage3-output:
     needs: [detect-images, stage1-2-download-qemu, create-release]
+    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
@@ -443,6 +432,7 @@ jobs:
           ./bin/autobuild --image "${{ matrix.image }}" --stage 3
 
       - name: Upload to release
+        if: ${{ !cancelled() }}
         run: |
           # Upload all output artifacts (*.img.xz for rpi, *.tar.gz or *.7z for hekate, etc.)
           UPLOADED=0
