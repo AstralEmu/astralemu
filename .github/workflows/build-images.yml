@@ -5,6 +5,12 @@ on:
     # Weekly build on Thursday 4AM UTC (after package builds on Sun/Wed)
     - cron: '0 4 * * 4'
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force full rebuild (ignore cache)'
+        required: false
+        type: boolean
+        default: false
 
 env:
   DEBIAN_FRONTEND: noninteractive
@@ -129,26 +135,27 @@ jobs:
 
       - name: Restore cached work-image
         id: cache-work
+        if: inputs.force_rebuild != true
         uses: actions/cache/restore@v4
         with:
           path: work-image.raw
           key: work-image-${{ steps.artifact.outputs.name }}-${{ hashFiles('devices.yml', 'bin/autobuild', '.packages-devices.yml', 'devices/**/setup.sh', 'devices/**/packages.yml', 'devices/**/config.sh', 'services/**/setup.sh', 'services/**/packages.yml') }}
 
-      - name: Full build - Stage 1+2 (cache miss)
-        if: steps.cache-work.outputs.cache-hit != 'true'
+      - name: Full build - Stage 1+2 (cache miss or force rebuild)
+        if: steps.cache-work.outputs.cache-hit != 'true' || inputs.force_rebuild == true
         run: |
           ./bin/autobuild --image "${{ matrix.image }}" --stage 1
           ./bin/autobuild --image "${{ matrix.image }}" --stage 2
         timeout-minutes: 90
 
       - name: Upgrade only (cache hit)
-        if: steps.cache-work.outputs.cache-hit == 'true'
+        if: steps.cache-work.outputs.cache-hit == 'true' && inputs.force_rebuild != true
         run: |
           echo "Cache hit - skipping full build, upgrading packages only"
           ./bin/autobuild --image "${{ matrix.image }}" --upgrade-only --stage 2
 
       - name: Save work-image to cache
-        if: steps.cache-work.outputs.cache-hit != 'true' && !cancelled()
+        if: (steps.cache-work.outputs.cache-hit != 'true' || inputs.force_rebuild == true) && !cancelled()
         uses: actions/cache/save@v4
         with:
           path: work-image.raw
