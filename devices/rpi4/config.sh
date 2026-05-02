@@ -7,6 +7,3 @@
 # RaspiOS vendor image (used by output_formats/rpi/ for merge)
 RASPIOS_URL="https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2025-11-24/2025-11-24-raspios-trixie-arm64-lite.img.xz"
 RASPIOS_IMAGE="2025-11-24-raspios-trixie-arm64-lite.img"
-
-# Services to combine (base is always added automatically)
-SERVICES="base"

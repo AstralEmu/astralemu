@@ -1341,40 +1341,64 @@ run_qemu_setup() {
 }
 
 # Build OCI image with podman (ublue/docker build_format)
+# Uses multi-stage build with one stage per service for granular caching
 run_docker_build() {
     local img_name="$1"
     local img_dir=$(get_image_dir "$img_name")
 
-    echo_step "Building OCI image with podman..."
+    echo_step "Building OCI image with podman (multi-stage)..."
 
-    # Build services setup (same as cloud-init/tarball)
-    build_services_setup "$img_name"
+    # Prepare setupfiles directory for build context
+    mkdir -p "$img_dir/setupfiles/packages"
 
-    # Generate Containerfile
-    cat > "$img_dir/Containerfile" << CEOF
-FROM ${IMAGE_URL}
+    # Copy devices.yml for repo introspection
+    cp "$WORKDIR_ROOT/devices.yml" "$img_dir/setupfiles/devices.yml"
 
-# Copy setup files into build context
-COPY setup.sh /tmp/setup.sh
-COPY setupfiles/ /etc/setupfiles/
+    # Copy all service packages.yml files
+    for service in $SERVICES; do
+        local service_path
+        service_path=$(resolve_service_path "$DEVICE_ID" "$service")
+        
+        if [[ -f "$service_path/packages.yml" ]]; then
+            cp "$service_path/packages.yml" "$img_dir/setupfiles/packages/${service}.yml"
+        fi
+        
+        # Copy service files (configs, systemd units, etc.)
+        if [[ -d "$service_path/files" ]]; then
+            mkdir -p "$img_dir/setupfiles/services/${service}"
+            cp -r "$service_path/files/." "$img_dir/setupfiles/services/${service}/"
+        fi
+        
+        # Copy install.sh if exists (build-time script)
+        if [[ -f "$service_path/install.sh" ]]; then
+            mkdir -p "$img_dir/setupfiles/services/${service}"
+            cp "$service_path/install.sh" "$img_dir/setupfiles/services/${service}/install.sh"
+        fi
+    done
 
-# Execute setup (same script as QEMU)
-RUN chmod +x /tmp/setup.sh && /tmp/setup.sh && rm -f /tmp/setup.sh
+    # Generate multi-stage Containerfile
+    echo_step "Generating Containerfile from templates..."
+    "$WORKDIR_ROOT/build/generate-containerfile.sh" "$DEVICE_ID" "$DISTRO_ID" $SERVICES
 
-# Validate bootc
-RUN bootc container lint || true
-CEOF
+    # Copy generated Containerfile to build context
+    cp "$WORKDIR_ROOT/build/Containerfile" "$img_dir/Containerfile"
 
-    # Build OCI image
-    echo_step "Running podman build..."
+    # Build OCI image with BuildKit caching
+    echo_step "Running podman build (multi-stage with cache)..."
+    echo "  Base: ${IMAGE_URL}"
+    echo "  Stages: base-common → services → final"
+    
     podman build --platform linux/arm64 \
         -t "astralemu-${DEVICE_ID}-${DISTRO_ID}:latest" \
+        --build-arg DEVICE_ID="$DEVICE_ID" \
+        --build-arg DISTRO_ID="$DISTRO_ID" \
         "$img_dir"
 
-    # Convert OCI → raw disk image
+    # Convert OCI → raw disk image using bootc-image-builder
     echo_step "Converting OCI image to raw disk..."
     local output_dir="$img_dir/bootc-output"
     mkdir -p "$output_dir"
+    
     sudo podman run --rm --privileged \
         --security-opt label=type:unconfined_t \
         -v "$output_dir":/output \

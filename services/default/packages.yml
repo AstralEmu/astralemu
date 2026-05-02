@@ -13,7 +13,7 @@ packages:
     - libsdl2-2.0-0
     - libfreeimage3
     - libfreetype6
-    - libcurl4
+    - libcurl4t64
     - libpugixml1v5
     - libfuse2t64
   fedora:

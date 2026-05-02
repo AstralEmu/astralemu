@@ -54,12 +54,12 @@ devices:
           - name: astralemu-device
             url: "https://astralemu.github.io/astralemu-packages/apt/device/rpi4"
             key_url: "https://astralemu.github.io/astralemu-packages/apt/device/rpi4/astralemu.gpg"
-            suites: "noble"
+            suites: "ubuntu-lts"
             components: "main"
           - name: astralemu-deps
-            url: "https://astralemu.github.io/astralemu-packages/apt/deps/noble"
+            url: "https://astralemu.github.io/astralemu-packages/apt/deps/debian-stable"
             key_url: "https://astralemu.github.io/astralemu-packages/apt/device/rpi4/astralemu.gpg"
-            suites: "noble"
+            suites: "debian-stable"
             components: "main"
           - name: raspios
             url: "http://archive.raspberrypi.com/debian/"
@@ -68,7 +68,7 @@ devices:
             components: "main"
           - name: debian-nonfree
             url: "http://deb.debian.org/debian"
-            suites: "trixie"
+            suites: "debian-stable"
             components: "non-free non-free-firmware"
       - id: ubuntu
         build_format: cloud-init
@@ -77,16 +77,16 @@ devices:
           - name: astralemu-device
             url: "https://astralemu.github.io/astralemu-packages/apt/device/rpi4"
             key_url: "https://astralemu.github.io/astralemu-packages/apt/device/rpi4/astralemu.gpg"
-            suites: "noble"
+            suites: "ubuntu-lts"
             components: "main"
       - id: ublue
         build_format: docker
-        base_image_url: "quay.io/fedora/fedora-bootc:42"
+        base_image_url: "quay.io/fedora/fedora-bootc:latest"
         repos:
           - name: astralemu-device
             url: "https://astralemu.github.io/astralemu-packages/dnf/device/rpi4"
           - name: astralemu-deps
-            url: "https://astralemu.github.io/astralemu-packages/dnf/deps/f41"
+            url: "https://astralemu.github.io/astralemu-packages/dnf/deps/latest"
       - id: arch
         build_format: tarball
         base_image_url: "http://os.archlinuxarm.org/os/ArchLinuxARM-rpi-aarch64-latest.tar.gz"
@@ -117,12 +117,12 @@ devices:
           - name: astralemu-device
             url: "https://astralemu.github.io/astralemu-packages/apt/device/armv8-2"
             key_url: "https://astralemu.github.io/astralemu-packages/apt/device/armv8-2/astralemu.gpg"
-            suites: "noble"
+            suites: "ubuntu-lts"
             components: "main"
           - name: astralemu-deps
-            url: "https://astralemu.github.io/astralemu-packages/apt/deps/noble"
+            url: "https://astralemu.github.io/astralemu-packages/apt/deps/debian-stable"
             key_url: "https://astralemu.github.io/astralemu-packages/apt/device/armv8-2/astralemu.gpg"
-            suites: "noble"
+            suites: "debian-stable"
             components: "main"
           - name: raspios
             url: "http://archive.raspberrypi.com/debian/"
@@ -131,7 +131,7 @@ devices:
             components: "main"
           - name: debian-nonfree
             url: "http://deb.debian.org/debian"
-            suites: "trixie"
+            suites: "debian-stable"
             components: "non-free non-free-firmware"
       - id: ubuntu
         build_format: cloud-init
@@ -140,16 +140,16 @@ devices:
           - name: astralemu-device
             url: "https://astralemu.github.io/astralemu-packages/apt/device/armv8-2"
             key_url: "https://astralemu.github.io/astralemu-packages/apt/device/armv8-2/astralemu.gpg"
-            suites: "noble"
+            suites: "ubuntu-lts"
             components: "main"
       - id: ublue
         build_format: docker
-        base_image_url: "quay.io/fedora/fedora-bootc:42"
+        base_image_url: "quay.io/fedora/fedora-bootc:latest"
         repos:
           - name: astralemu-device
             url: "https://astralemu.github.io/astralemu-packages/dnf/device/armv8-2"
           - name: astralemu-deps
-            url: "https://astralemu.github.io/astralemu-packages/dnf/deps/f41"
+            url: "https://astralemu.github.io/astralemu-packages/dnf/deps/latest"
       - id: arch
         build_format: tarball
         base_image_url: "http://os.archlinuxarm.org/os/ArchLinuxARM-rpi-aarch64-latest.tar.gz"
@@ -181,12 +181,12 @@ devices:
           - name: astralemu-device
             url: "https://astralemu.github.io/astralemu-packages/apt/device/l4t"
             key_url: "https://astralemu.github.io/astralemu-packages/apt/device/l4t/astralemu.gpg"
-            suites: "noble"
+            suites: "ubuntu-lts"
             components: "main"
           - name: astralemu-deps
-            url: "https://astralemu.github.io/astralemu-packages/apt/deps/noble"
+            url: "https://astralemu.github.io/astralemu-packages/apt/deps/debian-stable"
             key_url: "https://astralemu.github.io/astralemu-packages/apt/device/l4t/astralemu.gpg"
-            suites: "noble"
+            suites: "debian-stable"
             components: "main"
       - id: ubuntu
         build_format: cloud-init
@@ -195,16 +195,16 @@ devices:
           - name: astralemu-device
             url: "https://astralemu.github.io/astralemu-packages/apt/device/l4t"
             key_url: "https://astralemu.github.io/astralemu-packages/apt/device/l4t/astralemu.gpg"
-            suites: "noble"
+            suites: "ubuntu-lts"
             components: "main"
       - id: ublue
         build_format: docker
-        base_image_url: "quay.io/fedora/fedora-bootc:42"
+        base_image_url: "quay.io/fedora/fedora-bootc:latest"
         repos:
           - name: astralemu-device
             url: "https://astralemu.github.io/astralemu-packages/dnf/device/l4t"
           - name: astralemu-deps
-            url: "https://astralemu.github.io/astralemu-packages/dnf/deps/f41"
+            url: "https://astralemu.github.io/astralemu-packages/dnf/deps/latest"
       - id: arch
         build_format: tarball
         base_image_url: "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"

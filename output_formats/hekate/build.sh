@@ -102,7 +102,7 @@ output_hekate() {
 
     # Copy rootfs excluding /home (will be on homefs)
     echo "  Copying rootfs (excluding /home)..."
-    $SUDO_PREFIX rsync -aAX --exclude='/home/*' --exclude='/tmp/*' --exclude='/var/tmp/*' \
+    $SUDO_PREFIX rsync -aA --exclude='/home/*' --exclude='/tmp/*' --exclude='/var/tmp/*' \
         --exclude='/var/cache/apt/archives/*.deb' \
         "$MOUNT_POINT/" "$ROOTFS_DIR/"
 

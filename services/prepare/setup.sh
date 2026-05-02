@@ -8,7 +8,12 @@ echo "=== Preparing build environment ==="
 # PACKAGE MANAGER DETECTION
 # =============================================================================
 
-if command -v apt &> /dev/null; then
+# Detect bootc/immutable images: rpm-ostree for build, dnf/apt/pacman for runtime
+# Priority: rpm-ostree (bootc build) > apt (Debian/Ubuntu) > dnf (Fedora/Rocky) > pacman (Arch)
+if command -v rpm-ostree &> /dev/null; then
+    export PKG_MANAGER="rpm-ostree"
+    export BOOTC_BUILD="true"
+elif command -v apt &> /dev/null; then
     export PKG_MANAGER="apt"
     export DEBIAN_FRONTEND=noninteractive
 elif command -v dnf &> /dev/null; then
@@ -16,11 +21,12 @@ elif command -v dnf &> /dev/null; then
 elif command -v pacman &> /dev/null; then
     export PKG_MANAGER="pacman"
 else
-    echo "ERROR: No supported package manager found (apt, dnf, pacman)"
+    echo "ERROR: No supported package manager found (rpm-ostree, apt, dnf, pacman)"
     exit 1
 fi
 
 echo "  Package manager: $PKG_MANAGER"
+[ "$BOOTC_BUILD" = "true" ] && echo "  Bootc build context detected"
 
 # =============================================================================
 # UNIVERSAL PACKAGE MANAGER WRAPPERS
@@ -29,33 +35,37 @@ echo "  Package manager: $PKG_MANAGER"
 
 pkg_update() {
     case "$PKG_MANAGER" in
-        apt)    apt update ;;
-        dnf)    dnf check-update || true ;;
-        pacman) pacman -Sy --noconfirm ;;
+        apt)        apt update ;;
+        dnf)        dnf check-update || true ;;
+        pacman)     pacman -Sy --noconfirm ;;
+        rpm-ostree) rpm-ostree refresh-md ;;
     esac
 }
 
 pkg_install() {
     case "$PKG_MANAGER" in
-        apt)    apt install --no-install-recommends -y "$@" ;;
-        dnf)    dnf install -y "$@" ;;
-        pacman) pacman -S --noconfirm "$@" ;;
+        apt)        apt install --no-install-recommends -y "$@" ;;
+        dnf)        dnf install -y "$@" ;;
+        pacman)     pacman -S --noconfirm "$@" ;;
+        rpm-ostree) rpm-ostree install -y "$@" ;;
     esac
 }
 
 pkg_remove() {
     case "$PKG_MANAGER" in
-        apt)    apt purge -y "$@" ;;
-        dnf)    dnf remove -y "$@" ;;
-        pacman) pacman -Rns --noconfirm "$@" ;;
+        apt)        apt purge -y "$@" ;;
+        dnf)        dnf remove -y "$@" ;;
+        pacman)     pacman -Rns --noconfirm "$@" ;;
+        rpm-ostree) rpm-ostree uninstall -y "$@" ;;
     esac
 }
 
 pkg_upgrade() {
     case "$PKG_MANAGER" in
-        apt)    apt upgrade -y ;;
-        dnf)    dnf upgrade -y ;;
-        pacman) pacman -Syu --noconfirm ;;
+        apt)        apt upgrade -y ;;
+        dnf)        dnf upgrade -y ;;
+        pacman)     pacman -Syu --noconfirm ;;
+        rpm-ostree) rpm-ostree upgrade -y ;;
     esac
 }
 
@@ -72,6 +82,9 @@ pkg_clean() {
             ;;
         pacman)
             pacman -Sc --noconfirm
+            ;;
+        rpm-ostree)
+            rpm-ostree cleanup -m
             ;;
     esac
 }
@@ -157,7 +170,7 @@ pkg_service_install() {
             local distro_pkgs=$(yq -r ".packages.${DISTRO_ID} // [] | .[]" "$yml" 2>/dev/null | tr '\n' ' ')
             packages="$apt_pkgs $distro_pkgs"
             ;;
-        dnf)
+        dnf|rpm-ostree)
             packages=$(yq -r '.packages.fedora // [] | .[]' "$yml" 2>/dev/null | tr '\n' ' ')
             ;;
         pacman)
@@ -182,9 +195,10 @@ pkg_service_install() {
 pkg_update
 
 case "$PKG_MANAGER" in
-    apt)    pkg_install ca-certificates curl gnupg ;;
-    dnf)    pkg_install ca-certificates curl gnupg2 ;;
-    pacman) pkg_install ca-certificates curl gnupg ;;
+    apt)        pkg_install ca-certificates curl gnupg ;;
+    dnf)        pkg_install ca-certificates curl gnupg2 ;;
+    pacman)     pkg_install ca-certificates curl gnupg ;;
+    rpm-ostree) pkg_install ca-certificates curl gnupg2 ;;
 esac
 
 # =============================================================================

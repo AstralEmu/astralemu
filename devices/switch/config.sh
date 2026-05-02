@@ -17,8 +17,6 @@ QEMU_CPUS="4"
 # Output image name prefix
 OUTPUT_NAME="switch-linux"
 
-# Default services (always include base)
-SERVICES="base"
 
 # Part sizes in MB (FAT32 limit is 4GB)
 ROOTFS_PART_SIZE_MB=3900   # 3.9 GB per part

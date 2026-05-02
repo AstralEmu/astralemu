@@ -8,6 +8,3 @@
 # Same image works for both RPi4 and RPi5 (kernel selection happens in setup.sh)
 RASPIOS_URL="https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2025-11-24/2025-11-24-raspios-trixie-arm64-lite.img.xz"
 RASPIOS_IMAGE="2025-11-24-raspios-trixie-arm64-lite.img"
-
-# Services to combine (base is always added automatically)
-SERVICES="base"

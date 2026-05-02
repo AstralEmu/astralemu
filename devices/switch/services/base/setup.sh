@@ -50,7 +50,6 @@ systemctl stop zramswap 2>/dev/null || true
 case "$PKG_MANAGER" in
     apt)
         pkg_remove unattended-upgrades snapd 2>/dev/null || true
-        pkg_clean
 
         # Prevent snap from being reinstalled
         cat > /etc/apt/preferences.d/nosnap.pref << 'EOF'
@@ -60,10 +59,8 @@ Pin-Priority: -10
 EOF
         ;;
     dnf)
-        pkg_clean
         ;;
     pacman)
-        pkg_clean
         ;;
 esac
 
@@ -187,13 +184,5 @@ systemctl enable services-first-boot.service
 
 cp /etc/setupfiles/switch-dm.sh /usr/local/bin/switch-dm
 chmod +x /usr/local/bin/switch-dm
-
-# =============================================================================
-# CLEANUP
-# =============================================================================
-
-echo "=== Cleaning up ==="
-
-pkg_clean
 
 echo "=== Base system installation complete ==="
