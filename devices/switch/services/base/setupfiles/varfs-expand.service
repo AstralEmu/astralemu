@@ -1,13 +1,13 @@
 [Unit]
-Description=Homefs Dynamic Expansion Service
-Documentation=file:///usr/share/doc/switch-linux/homefs.md
+Description=/var Dynamic Expansion Service
+Documentation=file:///usr/share/doc/astralemu/varfs.md
 After=local-fs.target
 Requires=local-fs.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/homefs-expand-daemon.sh
-Restart=always
+ExecStart=/usr/local/bin/varfs-expand-daemon.sh
+Restart=on-failure
 RestartSec=30
 StandardOutput=journal
 StandardError=journal

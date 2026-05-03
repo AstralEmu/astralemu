@@ -19,8 +19,8 @@ OUTPUT_NAME="switch-linux"
 
 
 # Part sizes in MB (FAT32 limit is 4GB)
-ROOTFS_PART_SIZE_MB=3900   # 3.9 GB per part
-HOMEFS_PART_SIZE_MB=1900   # 1.9 GB per part
+ROOTFS_PART_SIZE_MB=3900   # 3.9 GB per rootfs squashfs part
+VARFS_PART_SIZE_MB=1900    # 1.9 GB per /var ext4 part (initial size)
 
 # Description
 DESCRIPTION="Ubuntu Noble ARM64 optimized for Nintendo Switch with EmulationStation"

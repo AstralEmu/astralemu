@@ -4,11 +4,13 @@
 # Produces a complete SD card directory structure for Nintendo Switch via Hekate
 #
 # Pipeline:
-#   1. Extract rootfs from QEMU image → SquashFS + FAT32 split
-#   2. Create homefs ext4 partition
-#   3. Generate custom initramfs
-#   4. Extract kernel + DTB + download coreboot
-#   5. Generate Hekate config + assemble final structure
+#   1. Extract rootfs from QEMU image → SquashFS + FAT32 split (slot A only)
+#   2. Create varfs ext4 partition (persistent /var)
+#   3. Generate SHA256 checksums for squashfs parts
+#   4. Write A/B slot file and tries counter
+#   5. Generate custom initramfs
+#   6. Extract kernel + DTB + download coreboot
+#   7. Generate Hekate config + assemble final structure
 #
 # Required variables (set by autobuild):
 #   $WORK_IMAGE      - QEMU work image (raw) with configured rootfs
@@ -18,10 +20,10 @@
 #   $SERVICES        - Space-separated list of services installed
 #
 # Required config.sh variables (from devices/<device>/config.sh):
-#   $ROOTFS_PART_SIZE_MB  - Max size per rootfs part (FAT32 limit)
-#   $HOMEFS_PART_SIZE_MB  - Size of initial homefs partition
-#   $SQUASHFS_COMP        - Compression algorithm (zstd)
-#   $SQUASHFS_LEVEL       - Compression level (19)
+#   $ROOTFS_PART_SIZE_MB  - Max size per rootfs part (FAT32 limit, default 3900)
+#   $VARFS_PART_SIZE_MB   - Size of initial /var partition (default 1900)
+#   $SQUASHFS_COMP        - Compression algorithm (default zstd)
+#   $SQUASHFS_LEVEL       - Compression level (default 19)
 #   $SWITCHROOT_REPO      - URL for Switchroot boot files
 #
 
@@ -35,7 +37,7 @@ output_hekate() {
 
     # Default values if not set in config.sh
     : "${ROOTFS_PART_SIZE_MB:=3900}"
-    : "${HOMEFS_PART_SIZE_MB:=1900}"
+    : "${VARFS_PART_SIZE_MB:=1900}"
     : "${SQUASHFS_COMP:=zstd}"
     : "${SQUASHFS_LEVEL:=19}"
 
@@ -65,9 +67,9 @@ output_hekate() {
     trap hekate_cleanup EXIT
 
     # =========================================================================
-    # STAGE 1: Extract rootfs → SquashFS + split
+    # STAGE 1: Extract rootfs → SquashFS + split (slot A only)
     # =========================================================================
-    echo_step "Creating rootfs SquashFS..."
+    echo_step "Creating rootfs SquashFS (slot A)..."
 
     local ROOTFS_DIR="$HEKATE_WORKDIR/rootfs"
     mkdir -p "$ROOTFS_DIR"
@@ -100,27 +102,43 @@ output_hekate() {
     mkdir -p "$MOUNT_POINT"
     $SUDO_PREFIX mount "$ROOT_PART" "$MOUNT_POINT"
 
-    # Copy rootfs excluding /home (will be on homefs)
-    echo "  Copying rootfs (excluding /home)..."
+    # Copy rootfs excluding volatile data
+    echo "  Copying rootfs (excluding volatile data)..."
     $SUDO_PREFIX rsync -aA --exclude='/home/*' --exclude='/tmp/*' --exclude='/var/tmp/*' \
         --exclude='/var/cache/apt/archives/*.deb' \
+        --exclude='/var/cache/dnf/*' \
+        --exclude='/var/cache/pacman/pkg/*' \
         "$MOUNT_POINT/" "$ROOTFS_DIR/"
 
-    # Save /home contents for homefs
-    local HOMEFS_CONTENT="$HEKATE_WORKDIR/home-content"
-    mkdir -p "$HOMEFS_CONTENT"
+    # Save /home contents for varfs
+    local HOME_CONTENT="$HEKATE_WORKDIR/home-content"
+    mkdir -p "$HOME_CONTENT"
     if [ -d "$MOUNT_POINT/home" ]; then
-        $SUDO_PREFIX cp -a "$MOUNT_POINT/home/"* "$HOMEFS_CONTENT/" 2>/dev/null || true
+        $SUDO_PREFIX cp -a "$MOUNT_POINT/home/"* "$HOME_CONTENT/" 2>/dev/null || true
+    fi
+
+    # Save /var contents for varfs (persistent /var, not overlay)
+    local VAR_CONTENT="$HEKATE_WORKDIR/var-content"
+    mkdir -p "$VAR_CONTENT"
+    if [ -d "$MOUNT_POINT/var" ]; then
+        echo "  Saving /var contents for persistent varfs..."
+        # Copy /var but exclude cache and tmp (they'll be recreated)
+        $SUDO_PREFIX rsync -aA --exclude='/cache/*' --exclude='/tmp/*' --exclude='/run/*' \
+            "$MOUNT_POINT/var/" "$VAR_CONTENT/"
     fi
 
     # Clean up rootfs
     echo "  Cleaning rootfs..."
     $SUDO_PREFIX rm -rf "$ROOTFS_DIR"/var/cache/apt/archives/*.deb
-    $SUDO_PREFIX rm -rf "$ROOTFS_DIR"/var/lib/apt/lists/*
+    $SUDO_PREFIX rm -rf "$ROOTFS_DIR"/var/cache/dnf/*
+    $SUDO_PREFIX rm -rf "$ROOTFS_DIR"/var/cache/pacman/pkg/*
     $SUDO_PREFIX rm -rf "$ROOTFS_DIR"/tmp/*
     $SUDO_PREFIX rm -rf "$ROOTFS_DIR"/var/tmp/*
+    $SUDO_PREFIX rm -rf "$ROOTFS_DIR"/var/run/*
+    # Remove /var content from squashfs — it will be on the persistent /var partition
+    $SUDO_PREFIX rm -rf "$ROOTFS_DIR"/var/home 2>/dev/null || true
+    $SUDO_PREFIX mkdir -p "$ROOTFS_DIR/var"
     $SUDO_PREFIX mkdir -p "$ROOTFS_DIR/home"
-    $SUDO_PREFIX mkdir -p "$ROOTFS_DIR/sd"
 
     # Create SquashFS
     echo "  Creating SquashFS ($SQUASHFS_COMP level $SQUASHFS_LEVEL)..."
@@ -131,44 +149,61 @@ output_hekate() {
 
     # Split into FAT32-compatible parts
     echo "  Splitting SquashFS into parts..."
-    "$(dirname "${BASH_SOURCE[0]}")/split-image.sh" "$SQUASHFS_FILE" "$HEKATE_WORKDIR/rootfs-parts" "$ROOTFS_PART_SIZE_MB"
+    local SLOT_A_DIR="$HEKATE_WORKDIR/slot-a"
+    mkdir -p "$SLOT_A_DIR"
+    "$(dirname "${BASH_SOURCE[0]}")/split-image.sh" "$SQUASHFS_FILE" "$SLOT_A_DIR" "$ROOTFS_PART_SIZE_MB"
 
-    echo_success "Rootfs SquashFS created and split"
+    # Generate SHA256 checksums for slot A
+    echo "  Generating SHA256 checksums for slot A..."
+    (cd "$SLOT_A_DIR" && sha256sum rootfs.squashfs.part* > rootfs.squashfs.sha256)
+
+    echo_success "Rootfs SquashFS created and split (slot A)"
 
     # =========================================================================
-    # STAGE 2: Create homefs ext4
+    # STAGE 2: Create varfs ext4 partition (persistent /var)
     # =========================================================================
-    echo_step "Creating homefs partition..."
+    echo_step "Creating varfs partition (/var)..."
 
-    local HOMEFS_FILE="$HEKATE_WORKDIR/homefs.ext4.part000"
+    local VARFS_FILE="$HEKATE_WORKDIR/var.ext4.part000"
 
     # Create sparse file
-    dd if=/dev/zero of="$HOMEFS_FILE" bs=1M count=0 seek="$HOMEFS_PART_SIZE_MB" 2>/dev/null
-    $SUDO_PREFIX mkfs.ext4 -q -L SWLINUX_HOME "$HOMEFS_FILE"
+    dd if=/dev/zero of="$VARFS_FILE" bs=1M count=0 seek="$VARFS_PART_SIZE_MB" 2>/dev/null
+    $SUDO_PREFIX mkfs.ext4 -q -L SWLINUX_VAR "$VARFS_FILE"
 
     # Mount and populate
-    local HOMEFS_MOUNT="$HEKATE_WORKDIR/homefs-mount"
-    mkdir -p "$HOMEFS_MOUNT"
-    local LOOP_HOMEFS
-    LOOP_HOMEFS=$($SUDO_PREFIX losetup -f --show "$HOMEFS_FILE")
-    $SUDO_PREFIX mount "$LOOP_HOMEFS" "$HOMEFS_MOUNT"
+    local VARFS_MOUNT="$HEKATE_WORKDIR/varfs-mount"
+    mkdir -p "$VARFS_MOUNT"
+    local LOOP_VARFS
+    LOOP_VARFS=$($SUDO_PREFIX losetup -f --show "$VARFS_FILE")
+    $SUDO_PREFIX mount "$LOOP_VARFS" "$VARFS_MOUNT"
 
-    # Copy home content from QEMU build
-    if [ -d "$HOMEFS_CONTENT" ] && [ "$(ls -A "$HOMEFS_CONTENT" 2>/dev/null)" ]; then
-        echo "  Copying home content..."
-        $SUDO_PREFIX cp -a "$HOMEFS_CONTENT/"* "$HOMEFS_MOUNT/" 2>/dev/null || true
+    # Create /var structure
+    $SUDO_PREFIX mkdir -p "$VARFS_MOUNT/home"
+    $SUDO_PREFIX mkdir -p "$VARFS_MOUNT/astralemu/etc-overlay/upper"
+    $SUDO_PREFIX mkdir -p "$VARFS_MOUNT/astralemu/etc-overlay/work"
+
+    # Copy /var content from QEMU build
+    if [ -d "$VAR_CONTENT" ] && [ "$(ls -A "$VAR_CONTENT" 2>/dev/null)" ]; then
+        echo "  Copying /var content..."
+        $SUDO_PREFIX rsync -aA "$VAR_CONTENT/" "$VARFS_MOUNT/" 2>/dev/null || true
     fi
 
-    # Create overlay directories
-    $SUDO_PREFIX mkdir -p "$HOMEFS_MOUNT/.overlays/etc/upper" "$HOMEFS_MOUNT/.overlays/etc/work"
-    $SUDO_PREFIX mkdir -p "$HOMEFS_MOUNT/.overlays/var/upper" "$HOMEFS_MOUNT/.overlays/var/work"
-    $SUDO_PREFIX mkdir -p "$HOMEFS_MOUNT/switch"
-    $SUDO_PREFIX chown 1000:1000 "$HOMEFS_MOUNT/switch"
+    # Copy home content into /var/home
+    if [ -d "$HOME_CONTENT" ] && [ "$(ls -A "$HOME_CONTENT" 2>/dev/null)" ]; then
+        echo "  Copying /home content to /var/home..."
+        $SUDO_PREFIX cp -a "$HOME_CONTENT/"* "$VARFS_MOUNT/home/" 2>/dev/null || true
+    fi
 
-    $SUDO_PREFIX umount "$HOMEFS_MOUNT"
-    $SUDO_PREFIX losetup -d "$LOOP_HOMEFS"
+    # Set ownership for home directory
+    local DEVICE_UID DEVICE_GID
+    DEVICE_UID=$($SUDO_PREFIX stat -c '%u' "$MOUNT_POINT/home" 2>/dev/null || echo 1000)
+    DEVICE_GID=$($SUDO_PREFIX stat -c '%g' "$MOUNT_POINT/home" 2>/dev/null || echo 1000)
+    $SUDO_PREFIX chown -R "$DEVICE_UID:$DEVICE_GID" "$VARFS_MOUNT/home" 2>/dev/null || true
 
-    echo_success "Homefs created"
+    $SUDO_PREFIX umount "$VARFS_MOUNT"
+    $SUDO_PREFIX losetup -d "$LOOP_VARFS"
+
+    echo_success "Varfs created"
 
     # =========================================================================
     # STAGE 3: Create initramfs
@@ -330,7 +365,7 @@ output_hekate() {
     local BOOT_TXT="$BOOTFILES_DIR/boot.txt"
     cat > "$BOOT_TXT" << BOOTSCR
 # U-Boot boot script for Switch Linux
-# Based on Switchroot boot chain, adapted for initramfs root
+# Based on Switchroot boot chain, adapted for A/B slot initramfs
 
 echo "=========================================="
 echo "       AstralEmu Boot Loader"
@@ -390,8 +425,8 @@ else
     fi
 fi
 
-# Set boot arguments
-setenv bootargs "root=/dev/ram0 rw rootwait fbcon=rotate:3 consoleblank=0 quiet"
+# Set boot arguments — initramfs handles rootfs assembly
+setenv bootargs "rw rootwait fbcon=rotate:3 consoleblank=0 quiet"
 setenv bootargs "\${bootargs} swlinux.image=${BUILD_NAME} \${bootargs_extra}"
 
 echo "Boot arguments: \${bootargs}"
@@ -412,9 +447,9 @@ BOOTSCR
     fi
 
     # =========================================================================
-    # STAGE 5: Assemble final output
+    # STAGE 5: Assemble final output (A/B layout)
     # =========================================================================
-    echo_step "Assembling final Hekate package..."
+    echo_step "Assembling final Hekate package (A/B layout)..."
 
     local OUTPUT_DIR="$WORKDIR_ROOT/output"
     local timestamp
@@ -424,11 +459,12 @@ BOOTSCR
     local FINAL_OUTPUT="$OUTPUT_DIR/${BUILD_NAME}-${services_suffix}-${timestamp}"
     mkdir -p "$FINAL_OUTPUT"
 
-    # Create directory structure (Switchroot layout)
+    # Create A/B directory structure
     mkdir -p "$FINAL_OUTPUT/bootloader/ini"
     mkdir -p "$FINAL_OUTPUT/switchroot/${BUILD_NAME}"
-    mkdir -p "$FINAL_OUTPUT/linux_img/${BUILD_NAME}/rootfs"
-    mkdir -p "$FINAL_OUTPUT/linux_img/${BUILD_NAME}/homefs"
+    mkdir -p "$FINAL_OUTPUT/linux_img/${BUILD_NAME}/slot/a"
+    mkdir -p "$FINAL_OUTPUT/linux_img/${BUILD_NAME}/slot/b"
+    mkdir -p "$FINAL_OUTPUT/linux_img/${BUILD_NAME}/var"
 
     # Copy boot files
     echo "  Copying boot files..."
@@ -440,12 +476,23 @@ BOOTSCR
     [ -f "$HEKATE_WORKDIR/initramfs.img" ] && \
         cp "$HEKATE_WORKDIR/initramfs.img" "$FINAL_OUTPUT/switchroot/${BUILD_NAME}/"
 
-    # Copy filesystem images
-    echo "  Copying rootfs parts..."
-    cp "$HEKATE_WORKDIR/rootfs-parts"/* "$FINAL_OUTPUT/linux_img/${BUILD_NAME}/rootfs/"
+    # Copy rootfs parts to slot A (slot B is empty for future updates)
+    echo "  Copying rootfs parts to slot A..."
+    cp "$SLOT_A_DIR"/rootfs.squashfs.part* "$FINAL_OUTPUT/linux_img/${BUILD_NAME}/slot/a/"
+    cp "$SLOT_A_DIR"/rootfs.squashfs.sha256 "$FINAL_OUTPUT/linux_img/${BUILD_NAME}/slot/a/"
 
-    echo "  Copying homefs..."
-    cp "$HEKATE_WORKDIR/homefs.ext4.part000" "$FINAL_OUTPUT/linux_img/${BUILD_NAME}/homefs/"
+    # Write slot file (boot from slot A)
+    echo "a" > "$FINAL_OUTPUT/linux_img/${BUILD_NAME}/slot"
+
+    # Write tries counter for slot A (3 attempts before fallback)
+    echo "3" > "$FINAL_OUTPUT/linux_img/${BUILD_NAME}/slot-a.tries"
+
+    # Create empty tries for slot B (not yet booted)
+    echo "0" > "$FINAL_OUTPUT/linux_img/${BUILD_NAME}/slot-b.tries"
+
+    # Copy varfs
+    echo "  Copying /var partition..."
+    cp "$VARFS_FILE" "$FINAL_OUTPUT/linux_img/${BUILD_NAME}/var/"
 
     # Create Hekate configuration
     echo "  Creating Hekate config..."
@@ -467,6 +514,7 @@ boot_prefixes=/switchroot/${BUILD_NAME}/
 id=${hekate_id}
 
 ; Boot arguments passed to kernel
+; A/B slot selection and /var is handled by initramfs
 bootargs_extra=quiet swlinux.image=${BUILD_NAME}
 EOF
     fi
@@ -482,6 +530,11 @@ EOF
     echo "  Output: $FINAL_OUTPUT"
     echo "  Structure:"
     find "$FINAL_OUTPUT" -type f | sed "s|$FINAL_OUTPUT|  .|" | sort
+    echo ""
+    echo "  A/B Slot Layout:"
+    echo "    Slot A: populated (${SQUASHFS_COMP}-${SQUASHFS_LEVEL} squashfs)"
+    echo "    Slot B: empty (for future updates)"
+    echo "    /var:   ${VARFS_PART_SIZE_MB}MB ext4 (persistent)"
     echo ""
     echo "  Copy all folders to SD card root, then boot via Hekate."
 }

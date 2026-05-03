@@ -92,6 +92,14 @@ if ! id -u switch &>/dev/null; then
     echo "switch:switch" | chpasswd
 fi
 
+# Ensure /var/home directory exists and is owned by switch
+mkdir -p /var/home
+chown switch:switch /var/home
+
+# Create /var/astralemu directory structure
+mkdir -p /var/astralemu/etc-overlay/upper
+mkdir -p /var/astralemu/etc-overlay/work
+
 # Passwordless sudo
 echo "switch ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/switch
 
@@ -157,15 +165,26 @@ EOF
 chmod +x /etc/profile.d/wayland.sh
 
 # =============================================================================
-# HOMEFS EXPANSION SERVICE
+# /VAR EXPANSION SERVICE
 # =============================================================================
 
-echo "=== Installing homefs expansion service ==="
+echo "=== Installing /var expansion service ==="
 
-cp /etc/setupfiles/homefs-expand.service /etc/systemd/system/
-cp /etc/setupfiles/homefs-expand-daemon.sh /usr/local/bin/
-chmod +x /usr/local/bin/homefs-expand-daemon.sh
-systemctl enable homefs-expand.service
+cp /etc/setupfiles/varfs-expand.service /etc/systemd/system/
+cp /etc/setupfiles/varfs-expand-daemon.sh /usr/local/bin/
+chmod +x /usr/local/bin/varfs-expand-daemon.sh
+systemctl enable varfs-expand.service
+
+# =============================================================================
+# SLOT VERIFICATION SERVICE
+# =============================================================================
+
+echo "=== Installing slot verification service ==="
+
+cp /etc/setupfiles/astralemu-slot-verify.service /etc/systemd/system/
+cp /etc/setupfiles/astralemu-slot-verify.sh /usr/local/bin/
+chmod +x /usr/local/bin/astralemu-slot-verify.sh
+systemctl enable astralemu-slot-verify.service
 
 # =============================================================================
 # SERVICES FIRST-BOOT SERVICE
