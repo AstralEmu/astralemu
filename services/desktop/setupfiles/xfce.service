@@ -1,0 +1,22 @@
+[Unit]
+Description=XFCE Desktop Session
+After=graphical.target
+Wants=graphical.target
+Conflicts=emulationstation.service plasma-mobile.service waydroid-session.service kodi.service
+
+[Service]
+Type=simple
+User=REPLACE_DEVICE_USER
+Group=REPLACE_DEVICE_USER
+PAMName=login
+
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DISPLAY=:0
+
+ExecStart=/usr/bin/setperf -p battery --oc off /usr/bin/startxfce4
+
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target

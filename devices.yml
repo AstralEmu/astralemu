@@ -1,0 +1,215 @@
+# AstralEmu - Definitions des appareils cibles
+#
+# Pour ajouter un nouveau device :
+#   1. Ajouter une entree ci-dessous
+#   2. Creer images/<id>/services/base/ avec le setup kernel/drivers/repos
+#   3. Commit et push
+#
+# Champs :
+#   id            - Identifiant (utilise partout : noms d'images, repos, dossiers)
+#   name          - Nom lisible
+#   arch          - Architecture (arm64, amd64)
+#   user          - Nom d'utilisateur systeme (ex: pi, switch)
+#                   Source de verite unique : cloud-init est genere depuis ce champ
+#   data_root     - Racine des donnees utilisateur (optionnel, defaut: /home/<user>)
+#                   A specifier seulement si different du home (ex: /sd pour Switch)
+#   pkg_device_id - ID device dans astralemu-packages (suffixe des paquets, ex: l4t, rpi4, armv8-2)
+#   runner        - Runner GitHub Actions (ubuntu-24.04-arm pour arm64, ubuntu-24.04 pour amd64)
+#   qemu          - Parametres QEMU pour la phase de build
+#   output        - Liste ordonnee de formats de sortie (chaque format = livrable complet)
+#   distros       - Liste des distros supportees (permet les builds multi-distro en parallele)
+#                   Chaque distro definit son build_format, son image de base, et ses repos
+#
+# build_format : methode de construction de l'image
+#   cloud-init   - Image cloud + cloud-init + QEMU (debian, ubuntu)
+#   tarball      - Archive rootfs → image raw + firstboot + QEMU (arch)
+#   docker       - Image OCI + podman build + bootc-image-builder (ublue)
+#
+# Les repos sont imbriques dans chaque distro car ils en dependent :
+#   apt pour debian/ubuntu, dnf pour ublue, pacman pour arch
+#
+# Format de nommage des images :
+#   <device>/<distro>/<services>   ex: rpi4/debian/default+emulations
+#   <device>/<services>            ex: rpi4/default+emulations (utilise la 1ere distro)
+
+devices:
+  - id: rpi4
+    name: "Raspberry Pi 4 (Cortex-A72)"
+    arch: arm64
+    user: pi
+    pkg_device_id: rpi4
+    runner: ubuntu-24.04-arm
+    qemu:
+      ram: "4G"
+      cpus: 4
+      cpu: cortex-a72
+      image_size: "6G"
+    output:
+      - rpi
+    distros:
+      - id: debian
+        build_format: cloud-init
+        base_image_url: "https://cloud.debian.org/images/cloud/trixie-backports/daily/latest/debian-13-backports-genericcloud-arm64-daily.raw"
+        repos:
+          - name: astralemu-device
+            url: "https://astralemu.github.io/astralemu-packages/apt/device/rpi4"
+            key_url: "https://astralemu.github.io/astralemu-packages/apt/device/rpi4/astralemu.gpg"
+            suites: "ubuntu-lts"
+            components: "main"
+          - name: astralemu-deps
+            url: "https://astralemu.github.io/astralemu-packages/apt/deps/debian-stable"
+            key_url: "https://astralemu.github.io/astralemu-packages/apt/device/rpi4/astralemu.gpg"
+            suites: "debian-stable"
+            components: "main"
+          - name: raspios
+            url: "http://archive.raspberrypi.com/debian/"
+            key_url: "http://archive.raspberrypi.com/debian/raspberrypi.gpg.key"
+            suites: "bookworm"
+            components: "main"
+          - name: debian-nonfree
+            url: "http://deb.debian.org/debian"
+            suites: "debian-stable"
+            components: "non-free non-free-firmware"
+      - id: ubuntu
+        build_format: cloud-init
+        base_image_url: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img"
+        repos:
+          - name: astralemu-device
+            url: "https://astralemu.github.io/astralemu-packages/apt/device/rpi4"
+            key_url: "https://astralemu.github.io/astralemu-packages/apt/device/rpi4/astralemu.gpg"
+            suites: "ubuntu-lts"
+            components: "main"
+      - id: ublue
+        build_format: docker
+        base_image_url: "quay.io/fedora/fedora-bootc:latest"
+        repos:
+          - name: astralemu-device
+            url: "https://astralemu.github.io/astralemu-packages/dnf/device/rpi4"
+          - name: astralemu-deps
+            url: "https://astralemu.github.io/astralemu-packages/dnf/deps/latest"
+      - id: arch
+        build_format: tarball
+        base_image_url: "http://os.archlinuxarm.org/os/ArchLinuxARM-rpi-aarch64-latest.tar.gz"
+        repos:
+          - name: astralemu-device
+            url: "https://astralemu.github.io/astralemu-packages/pacman/device/rpi4"
+          - name: astralemu-deps
+            url: "https://astralemu.github.io/astralemu-packages/pacman/deps/latest"
+
+  - id: rpi5
+    name: "Raspberry Pi 5 (Cortex-A76)"
+    arch: arm64
+    user: pi
+    pkg_device_id: armv8-2
+    runner: ubuntu-24.04-arm
+    qemu:
+      ram: "4G"
+      cpus: 4
+      cpu: cortex-a76
+      image_size: "6G"
+    output:
+      - rpi
+    distros:
+      - id: debian
+        build_format: cloud-init
+        base_image_url: "https://cloud.debian.org/images/cloud/trixie-backports/daily/latest/debian-13-backports-genericcloud-arm64-daily.raw"
+        repos:
+          - name: astralemu-device
+            url: "https://astralemu.github.io/astralemu-packages/apt/device/armv8-2"
+            key_url: "https://astralemu.github.io/astralemu-packages/apt/device/armv8-2/astralemu.gpg"
+            suites: "ubuntu-lts"
+            components: "main"
+          - name: astralemu-deps
+            url: "https://astralemu.github.io/astralemu-packages/apt/deps/debian-stable"
+            key_url: "https://astralemu.github.io/astralemu-packages/apt/device/armv8-2/astralemu.gpg"
+            suites: "debian-stable"
+            components: "main"
+          - name: raspios
+            url: "http://archive.raspberrypi.com/debian/"
+            key_url: "http://archive.raspberrypi.com/debian/raspberrypi.gpg.key"
+            suites: "bookworm"
+            components: "main"
+          - name: debian-nonfree
+            url: "http://deb.debian.org/debian"
+            suites: "debian-stable"
+            components: "non-free non-free-firmware"
+      - id: ubuntu
+        build_format: cloud-init
+        base_image_url: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img"
+        repos:
+          - name: astralemu-device
+            url: "https://astralemu.github.io/astralemu-packages/apt/device/armv8-2"
+            key_url: "https://astralemu.github.io/astralemu-packages/apt/device/armv8-2/astralemu.gpg"
+            suites: "ubuntu-lts"
+            components: "main"
+      - id: ublue
+        build_format: docker
+        base_image_url: "quay.io/fedora/fedora-bootc:latest"
+        repos:
+          - name: astralemu-device
+            url: "https://astralemu.github.io/astralemu-packages/dnf/device/armv8-2"
+          - name: astralemu-deps
+            url: "https://astralemu.github.io/astralemu-packages/dnf/deps/latest"
+      - id: arch
+        build_format: tarball
+        base_image_url: "http://os.archlinuxarm.org/os/ArchLinuxARM-rpi-aarch64-latest.tar.gz"
+        repos:
+          - name: astralemu-device
+            url: "https://astralemu.github.io/astralemu-packages/pacman/device/armv8-2"
+          - name: astralemu-deps
+            url: "https://astralemu.github.io/astralemu-packages/pacman/deps/latest"
+
+  - id: switch
+    name: "Nintendo Switch (Tegra X1)"
+    arch: arm64
+    user: switch
+    data_root: "/sd"
+    pkg_device_id: l4t
+    runner: ubuntu-24.04-arm
+    qemu:
+      ram: "4G"
+      cpus: 4
+      cpu: cortex-a57
+      image_size: "6G"
+    output:
+      - hekate
+    distros:
+      - id: debian
+        build_format: cloud-init
+        base_image_url: "https://cloud.debian.org/images/cloud/trixie-backports/daily/latest/debian-13-backports-genericcloud-arm64-daily.raw"
+        repos:
+          - name: astralemu-device
+            url: "https://astralemu.github.io/astralemu-packages/apt/device/l4t"
+            key_url: "https://astralemu.github.io/astralemu-packages/apt/device/l4t/astralemu.gpg"
+            suites: "ubuntu-lts"
+            components: "main"
+          - name: astralemu-deps
+            url: "https://astralemu.github.io/astralemu-packages/apt/deps/debian-stable"
+            key_url: "https://astralemu.github.io/astralemu-packages/apt/device/l4t/astralemu.gpg"
+            suites: "debian-stable"
+            components: "main"
+      - id: ubuntu
+        build_format: cloud-init
+        base_image_url: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img"
+        repos:
+          - name: astralemu-device
+            url: "https://astralemu.github.io/astralemu-packages/apt/device/l4t"
+            key_url: "https://astralemu.github.io/astralemu-packages/apt/device/l4t/astralemu.gpg"
+            suites: "ubuntu-lts"
+            components: "main"
+      - id: ublue
+        build_format: docker
+        base_image_url: "quay.io/fedora/fedora-bootc:latest"
+        repos:
+          - name: astralemu-device
+            url: "https://astralemu.github.io/astralemu-packages/dnf/device/l4t"
+          - name: astralemu-deps
+            url: "https://astralemu.github.io/astralemu-packages/dnf/deps/latest"
+      - id: arch
+        build_format: tarball
+        base_image_url: "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
+        repos:
+          - name: astralemu-device
+            url: "https://astralemu.github.io/astralemu-packages/pacman/device/l4t"
+          - name: astralemu-deps
+            url: "https://astralemu.github.io/astralemu-packages/pacman/deps/latest"

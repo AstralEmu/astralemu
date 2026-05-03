@@ -1,0 +1,23 @@
+# List of images to build in GitHub Actions
+# Format: device/distro/services or device/services (1st distro default)
+#
+# Examples:
+#   rpi4/default+emulations              # RPi4 with default distro + emulation services
+#   rpi4/debian/default+emulations       # Same, explicit distro
+#   switch/default+emulations+desktop    # Switch with desktop
+#
+# See ./bin/autobuild --list-images for available devices/services
+
+# Raspberry Pi 4
+rpi4/debian/emulations+desktop+kodi
+
+# Raspberry Pi 5
+rpi5/debian/emulations+android+desktop+kodi
+
+# Nintendo Switch
+switch/ubuntu/emulations+android+tabs+kodi
+
+# Universal Blue (OCI/bootc builds)
+rpi4/ublue/emulations+desktop
+rpi5/ublue/emulations+android+desktop
+switch/ublue/emulations+android+tabs

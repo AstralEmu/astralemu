@@ -1,0 +1,15 @@
+[Unit]
+Description=AstralEmu first-boot setup runner
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/root/setup-completed
+
+[Service]
+Type=oneshot
+ExecStart=/root/setup-runner.sh
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,440 @@
+#!/bin/sh
+#
+# Switch Linux initramfs init script
+# Main entry point (PID 1) — orchestrates boot process
+#
+# Supports A/B slot rootfs with SHA256 verification and auto-rollback.
+# /var is a persistent ext4 partition (no overlay). /etc is an overlay
+# with upper dir stored on /var.
+#
+
+# Mount essential filesystems
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+# Create loop device nodes (64 devices for large multi-part images)
+for i in $(seq 0 63); do
+    mknod -m 660 /dev/loop$i b 7 $i 2>/dev/null || true
+done
+
+# Parse kernel command line
+IMAGE_NAME="switch-linux"
+DEBUG=false
+
+for param in $(cat /proc/cmdline); do
+    case $param in
+        swlinux.image=*)
+            IMAGE_NAME="${param#swlinux.image=}"
+            ;;
+        swlinux.debug*)
+            DEBUG=true
+            ;;
+    esac
+done
+
+log() {
+    echo "[initramfs] $1"
+}
+
+error() {
+    echo "[initramfs] ERROR: $1"
+    if $DEBUG; then
+        echo "Dropping to shell for debugging..."
+        exec /bin/sh
+    fi
+    sleep 5
+}
+
+log "=========================================="
+log "       AstralEmu Switch Initramfs"
+log "=========================================="
+log "Image: $IMAGE_NAME"
+log "Debug: $DEBUG"
+
+# Source modular scripts if available
+SCRIPTS_DIR="/scripts"
+
+# =============================================================================
+# MOUNT SD CARD
+# =============================================================================
+
+log "--- Mounting SD card ---"
+
+if [ -f "$SCRIPTS_DIR/mount-sd.sh" ]; then
+    . "$SCRIPTS_DIR/mount-sd.sh" /sd
+else
+    # Inline fallback
+    SD_DEV=""
+    for i in $(seq 1 30); do
+        for dev in /dev/mmcblk0p1 /dev/mmcblk1p1 /dev/sda1; do
+            if [ -b "$dev" ]; then
+                SD_DEV="$dev"
+                break 2
+            fi
+        done
+        sleep 0.2
+    done
+
+    if [ -z "$SD_DEV" ]; then
+        error "SD card not found!"
+        exec /bin/sh
+    fi
+
+    log "Found SD card: $SD_DEV"
+    mount -t vfat -o rw,utf8,fmask=0022,dmask=0022 "$SD_DEV" /sd
+fi
+
+if [ $? -ne 0 ]; then
+    error "Failed to mount SD card!"
+    exec /bin/sh
+fi
+
+# Check image directory exists
+IMAGE_DIR="/sd/linux_img/$IMAGE_NAME"
+if [ ! -d "$IMAGE_DIR" ]; then
+    error "Image directory not found: $IMAGE_DIR"
+    log "Available images:"
+    ls -la /sd/linux_img/ 2>/dev/null || true
+    exec /bin/sh
+fi
+
+log "Image directory: $IMAGE_DIR"
+
+# =============================================================================
+# SELECT AND VERIFY A/B SLOT
+# =============================================================================
+
+log "--- Selecting boot slot ---"
+
+SLOT_FILE="$IMAGE_DIR/slot"
+ACTIVE_SLOT="a"
+FALLBACK_SLOT="b"
+
+# Read current slot preference
+if [ -f "$SLOT_FILE" ]; then
+    ACTIVE_SLOT=$(cat "$SLOT_FILE" 2>/dev/null | tr -d '[:space:]')
+fi
+
+# Validate slot value
+if [ "$ACTIVE_SLOT" != "a" ] && [ "$ACTIVE_SLOT" != "b" ]; then
+    log "Invalid slot value '$ACTIVE_SLOT', defaulting to 'a'"
+    ACTIVE_SLOT="a"
+fi
+
+if [ "$ACTIVE_SLOT" = "a" ]; then
+    FALLBACK_SLOT="b"
+else
+    FALLBACK_SLOT="a"
+fi
+
+log "Preferred slot: $ACTIVE_SLOT (fallback: $FALLBACK_SLOT)"
+
+# Verify slot using verify-slot.sh if available
+BOOT_SLOT=""
+
+if [ -f "$SCRIPTS_DIR/verify-slot.sh" ]; then
+    BOOT_SLOT=$(sh "$SCRIPTS_DIR/verify-slot.sh" "$IMAGE_DIR" "$ACTIVE_SLOT" "$FALLBACK_SLOT")
+else
+    # Inline slot verification
+    verify_slot() {
+        local img_dir="$1"
+        local slot="$2"
+        local slot_dir="$img_dir/slot/$slot"
+
+        if [ ! -d "$slot_dir" ]; then
+            log "Slot $slot: directory not found"
+            return 1
+        fi
+
+        # Check tries counter
+        local tries_file="$img_dir/slot-$slot.tries"
+        if [ -f "$tries_file" ]; then
+            local tries
+            tries=$(cat "$tries_file" 2>/dev/null | tr -d '[:space:]')
+            if [ -n "$tries" ] && [ "$tries" -le 0 ] 2>/dev/null; then
+                log "Slot $slot: no tries remaining ($tries)"
+                return 1
+            fi
+        fi
+
+        # Verify SHA256 checksums
+        local sha256_file="$slot_dir/rootfs.squashfs.sha256"
+        if [ -f "$sha256_file" ]; then
+            log "Slot $slot: verifying SHA256 checksums..."
+            if command -v sha256sum >/dev/null 2>&1; then
+                if ! (cd "$slot_dir" && sha256sum -c "$sha256_file" >/dev/null 2>&1); then
+                    log "Slot $slot: SHA256 verification FAILED"
+                    return 1
+                fi
+                log "Slot $slot: SHA256 OK"
+            else
+                log "Slot $slot: sha256sum not available, skipping verification"
+            fi
+        else
+            log "Slot $slot: no SHA256 file, skipping verification"
+        fi
+
+        # Check that at least one part exists
+        if ! ls "$slot_dir"/rootfs.squashfs.part* >/dev/null 2>&1; then
+            log "Slot $slot: no squashfs parts found"
+            return 1
+        fi
+
+        log "Slot $slot: valid"
+        return 0
+    }
+
+    if verify_slot "$IMAGE_DIR" "$ACTIVE_SLOT"; then
+        BOOT_SLOT="$ACTIVE_SLOT"
+    elif verify_slot "$IMAGE_DIR" "$FALLBACK_SLOT"; then
+        log "Falling back to slot $FALLBACK_SLOT"
+        BOOT_SLOT="$FALLBACK_SLOT"
+        # Update slot file to fallback
+        echo "$FALLBACK_SLOT" > "$SLOT_FILE"
+    else
+        error "No valid boot slot found!"
+        exec /bin/sh
+    fi
+fi
+
+if [ -z "$BOOT_SLOT" ]; then
+    error "No valid boot slot found!"
+    exec /bin/sh
+fi
+
+log "Booting from slot: $BOOT_SLOT"
+
+# Decrement tries counter for the booted slot
+TRIES_FILE="$IMAGE_DIR/slot-$BOOT_SLOT.tries"
+if [ -f "$TRIES_FILE" ]; then
+    TRIES=$(cat "$TRIES_FILE" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$TRIES" ] && [ "$TRIES" -gt 0 ] 2>/dev/null; then
+        TRIES=$((TRIES - 1))
+        echo "$TRIES" > "$TRIES_FILE"
+        log "Slot $BOOT_SLOT tries remaining: $TRIES"
+    fi
+fi
+
+# =============================================================================
+# MOUNT ROOTFS (squashfs from A/B slot)
+# =============================================================================
+
+log "--- Mounting rootfs ---"
+
+SLOT_DIR="$IMAGE_DIR/slot/$BOOT_SLOT"
+
+if [ -f "$SCRIPTS_DIR/mount-rootfs.sh" ]; then
+    . "$SCRIPTS_DIR/mount-rootfs.sh" "$SLOT_DIR" /rootfs
+else
+    # Inline fallback
+    ROOTFS_PARTS_DIR="$SLOT_DIR"
+    PARTS=$(ls "$ROOTFS_PARTS_DIR"/rootfs.squashfs.part* 2>/dev/null | sort)
+    PART_COUNT=$(echo "$PARTS" | wc -w)
+
+    if [ "$PART_COUNT" -eq 0 ]; then
+        error "No rootfs parts found in $ROOTFS_PARTS_DIR"
+        exec /bin/sh
+    fi
+
+    log "Found $PART_COUNT rootfs part(s)"
+
+    mkdir -p /rootfs
+
+    if [ "$PART_COUNT" -eq 1 ]; then
+        SINGLE_PART=$(echo "$PARTS" | head -1)
+        /sbin/losetup /dev/loop0 "$SINGLE_PART"
+        ROOTFS_DEV="/dev/loop0"
+    else
+        LOOP_NUM=0
+        DM_TABLE=""
+        OFFSET=0
+
+        for PART in $PARTS; do
+            LOOP_DEV="/dev/loop$LOOP_NUM"
+            /sbin/losetup "$LOOP_DEV" "$PART"
+            SIZE_BYTES=$(stat -c %s "$PART")
+            SIZE_SECTORS=$((SIZE_BYTES / 512))
+
+            if [ -n "$DM_TABLE" ]; then
+                DM_TABLE="$DM_TABLE
+"
+            fi
+            DM_TABLE="${DM_TABLE}${OFFSET} ${SIZE_SECTORS} linear ${LOOP_DEV} 0"
+            OFFSET=$((OFFSET + SIZE_SECTORS))
+            LOOP_NUM=$((LOOP_NUM + 1))
+        done
+
+        echo "$DM_TABLE" | /sbin/dmsetup create rootfs-combined
+        ROOTFS_DEV="/dev/mapper/rootfs-combined"
+    fi
+
+    mount -t squashfs -o ro "$ROOTFS_DEV" /rootfs
+fi
+
+if [ $? -ne 0 ]; then
+    error "Failed to mount rootfs!"
+    exec /bin/sh
+fi
+
+# =============================================================================
+# MOUNT VARFS (persistent ext4, replaces homefs)
+# =============================================================================
+
+log "--- Mounting /var ---"
+
+VARFS_DIR="$IMAGE_DIR/var"
+mkdir -p "$VARFS_DIR"
+
+if [ -f "$SCRIPTS_DIR/mount-varfs.sh" ]; then
+    . "$SCRIPTS_DIR/mount-varfs.sh" "$VARFS_DIR" /rootfs/var
+else
+    # Inline fallback
+    PARTS=$(ls "$VARFS_DIR"/var.ext4.part* 2>/dev/null | sort)
+    PART_COUNT=$(echo "$PARTS" | wc -w)
+    LOOP_START=10
+
+    if [ "$PART_COUNT" -eq 0 ]; then
+        error "No /var partition found! Cannot boot without persistent /var"
+        exec /bin/sh
+    fi
+
+    log "Found $PART_COUNT varfs part(s)"
+
+    mkdir -p /rootfs/var
+
+    if [ "$PART_COUNT" -eq 1 ]; then
+        SINGLE_PART=$(echo "$PARTS" | head -1)
+        /sbin/losetup /dev/loop$LOOP_START "$SINGLE_PART"
+        VARFS_DEV="/dev/loop$LOOP_START"
+    else
+        LOOP_NUM=$LOOP_START
+        DM_TABLE=""
+        OFFSET=0
+
+        for PART in $PARTS; do
+            LOOP_DEV="/dev/loop$LOOP_NUM"
+            /sbin/losetup "$LOOP_DEV" "$PART"
+            SIZE_BYTES=$(stat -c %s "$PART")
+            SIZE_SECTORS=$((SIZE_BYTES / 512))
+
+            if [ -n "$DM_TABLE" ]; then
+                DM_TABLE="$DM_TABLE
+"
+            fi
+            DM_TABLE="${DM_TABLE}${OFFSET} ${SIZE_SECTORS} linear ${LOOP_DEV} 0"
+            OFFSET=$((OFFSET + SIZE_SECTORS))
+            LOOP_NUM=$((LOOP_NUM + 1))
+        done
+
+        echo "$DM_TABLE" | /sbin/dmsetup create varfs-combined
+        VARFS_DEV="/dev/mapper/varfs-combined"
+    fi
+
+    # Run fsck before mounting
+    if command -v e2fsck >/dev/null 2>&1; then
+        log "Running e2fsck on /var..."
+        e2fsck -p "$VARFS_DEV" 2>/dev/null || true
+    fi
+
+    mount -t ext4 -o rw,noatime "$VARFS_DEV" /rootfs/var
+fi
+
+if [ $? -ne 0 ]; then
+    error "Failed to mount /var!"
+    exec /bin/sh
+fi
+
+log "/var mounted successfully"
+
+# =============================================================================
+# SETUP /var STRUCTURE
+# =============================================================================
+
+log "--- Setting up /var structure ---"
+
+# Ensure /var/home exists (persistent user data)
+mkdir -p /rootfs/var/home
+
+# Ensure /var/astralemu exists (system persistent data)
+mkdir -p /rootfs/var/astralemu/etc-overlay/upper
+mkdir -p /rootfs/var/astralemu/etc-overlay/work
+
+# =============================================================================
+# SETUP OVERLAY /etc (lower=slot squashfs, upper=/var/astralemu/etc-overlay)
+# =============================================================================
+
+log "--- Setting up /etc overlay ---"
+
+if [ -f "$SCRIPTS_DIR/setup-overlays.sh" ]; then
+    . "$SCRIPTS_DIR/setup-overlays.sh" /rootfs /rootfs/var
+else
+    # Inline fallback
+    OVERLAY_BASE="/rootfs/var/astralemu/etc-overlay"
+    mkdir -p "$OVERLAY_BASE/upper" "$OVERLAY_BASE/work"
+
+    mount -t overlay overlay \
+        -o "lowerdir=/rootfs/etc,upperdir=$OVERLAY_BASE/upper,workdir=$OVERLAY_BASE/work" \
+        /rootfs/etc
+fi
+
+if [ $? -ne 0 ]; then
+    error "Failed to mount /etc overlay!"
+    exec /bin/sh
+fi
+
+# =============================================================================
+# SETUP /home (bind mount from /var/home)
+# =============================================================================
+
+log "--- Setting up /home ---"
+
+# Ensure /home exists in rootfs (it should, but create if missing)
+mkdir -p /rootfs/home
+
+# Bind mount /var/home → /home
+mount --bind /rootfs/var/home /rootfs/home
+if [ $? -ne 0 ]; then
+    error "Failed to bind mount /var/home → /home!"
+    # Non-fatal: continue without /home
+fi
+
+# =============================================================================
+# MOUNT SD CARD IN FINAL SYSTEM
+# =============================================================================
+
+log "--- Moving SD mount to final system ---"
+mkdir -p /rootfs/sd
+mount --move /sd /rootfs/sd
+
+# =============================================================================
+# WRITE RUNTIME INFO FOR SERVICES
+# =============================================================================
+
+log "--- Writing runtime info ---"
+
+mkdir -p /rootfs/run
+cat > /rootfs/run/astralemu-info << EOF
+IMAGE_NAME=$IMAGE_NAME
+BOOT_SLOT=$BOOT_SLOT
+IMAGE_DIR=$IMAGE_DIR
+VARFS_DIR=$VARFS_DIR
+VARFS_DEV=$VARFS_DEV
+ROOTFS_DEV=$ROOTFS_DEV
+EOF
+
+# =============================================================================
+# SWITCH ROOT
+# =============================================================================
+
+log "--- Switching to real root filesystem ---"
+log "=========================================="
+
+# Cleanup
+umount /proc
+umount /sys
+
+exec switch_root /rootfs /sbin/init
+
+error "switch_root failed!"
+exec /bin/sh

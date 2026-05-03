@@ -1,0 +1,17 @@
+[Unit]
+Description=Services First Boot Setup
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/services-first-boot.sh
+
+# Retry on failure
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,44 @@
+# Build outputs
+*.img
+*.img.xz
+*.raw
+*.qcow2
+*.iso
+*.squashfs
+*.7z
+output/
+
+# Cache
+.cache/
+
+# Temporary files
+*.tmp
+*.bak
+*~
+*.swp
+
+# Logs
+*.log
+
+# GitHub Actions
+release_body.md
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+.claude/
+
+# Keep devices/ folder structure
+!devices/*/
+!devices/*/*.sh
+!devices/*/setupfiles/
+!devices/*/cloudinit/
+!devices/*/cloudinit/user-data
+!devices/*/cloudinit/meta-data
+# But ignore seed.img (automatically generated)
+devices/*/cloudinit/seed.img
+
+# Generated Containerfile
+build/Containerfile

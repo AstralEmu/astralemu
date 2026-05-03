@@ -1,0 +1,25 @@
+[Unit]
+Description=EmulationStation Frontend
+After=graphical.target
+Wants=graphical.target
+Conflicts=phosh.service xfce.service waydroid-session.service kodi.service
+
+[Service]
+Type=simple
+User=REPLACE_DEVICE_USER
+Group=REPLACE_DEVICE_USER
+PAMName=login
+
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=XDG_SESSION_TYPE=wayland
+Environment=WAYLAND_DISPLAY=wayland-1
+Environment=SDL_VIDEODRIVER=wayland
+
+ExecStart=/usr/bin/setperf -p battery --oc battery /usr/bin/cage -s -- emulationstation --no-splash
+
+Restart=on-failure
+RestartSec=3
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=graphical.target

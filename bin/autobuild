@@ -1,0 +1,1711 @@
+#!/bin/bash
+set -e
+
+# ============================================================================
+# AstralEmu - Unified multi-device image builder
+# 1. Download base images
+# 2. Launch QEMU with automatic setup
+# 3. Run output format modules (rpi, hekate, etc.)
+# ============================================================================
+
+WORKDIR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$WORKDIR_ROOT"
+
+# Remote devices.yml from astralemu-packages (source of truth for power scores)
+PACKAGES_DEVICES_URL="https://raw.githubusercontent.com/AstralEmu/astralemu-packages/refs/heads/main/devices.yml"
+PACKAGES_DEVICES_CACHE=""
+
+# Working image name (used during QEMU phase)
+WORK_IMAGE="work-image.raw"
+
+# Image variables (overridden by config.sh and devices.yml)
+OUTPUT_IMAGE=""
+QEMU_RAM="4G"
+QEMU_CPUS="4"
+QEMU_CPU="cortex-a72"
+IMAGE_SIZE="6G"
+DESCRIPTION=""
+CLOUD=true
+IMAGE_URL=""
+
+# Device variables (set by load_device_config)
+DEVICE_ID=""
+DEVICE_POWER=""
+DEVICE_ARCH=""
+DISTRO_ID=""
+DEVICE_USER=""
+DATA_ROOT=""
+PKG_DEVICE_ID=""
+
+# Control variables
+CURRENT_IMAGE=""
+BUILD_ALL_IMAGES=false
+STAGE="all"
+TEMP_IMAGE_DIR=""  # Temporary directory for dynamic images
+QEMU_LOG_FILE=""   # QEMU log file for error detection
+
+# ============================================================================
+# YAML helpers (requires yq)
+# ============================================================================
+
+get_device_field() {
+    local device_id="$1" field="$2"
+    yq ".devices[] | select(.id == \"$device_id\") | $field" "$WORKDIR_ROOT/devices.yml"
+}
+
+get_distro_field() {
+    local device_id="$1" distro_id="$2" field="$3"
+    yq ".devices[] | select(.id == \"$device_id\") | .distros[] | select(.id == \"$distro_id\") | $field" "$WORKDIR_ROOT/devices.yml"
+}
+
+# Fetch device power score from astralemu-packages (source of truth)
+# Uses pkg_device_id to look up the power field in the remote devices.yml
+fetch_device_power() {
+    local pkg_id="$1"
+
+    # Download and cache remote devices.yml on first call
+    if [ -z "$PACKAGES_DEVICES_CACHE" ] || [ ! -f "$PACKAGES_DEVICES_CACHE" ]; then
+        PACKAGES_DEVICES_CACHE=$(mktemp -t astralemu-packages-devices.XXXXXX)
+        wget -q "$PACKAGES_DEVICES_URL" -O "$PACKAGES_DEVICES_CACHE"
+    fi
+
+    local power
+    power=$(yq ".devices[] | select(.id == \"$pkg_id\") | .power" "$PACKAGES_DEVICES_CACHE")
+
+    if [ -z "$power" ] || [ "$power" = "null" ]; then
+        echo_error "Device power not found for pkg_device_id '$pkg_id' in astralemu-packages"
+        exit 1
+    fi
+
+    echo "$power"
+}
+
+# Colors for display
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+echo_step() {
+    echo -e "${BLUE}[$(date +'%H:%M:%S')]${NC} ${GREEN}$1${NC}"
+}
+
+echo_warn() {
+    echo -e "${YELLOW}⚠ $1${NC}"
+}
+
+echo_error() {
+    echo -e "${RED}✗ $1${NC}"
+}
+
+echo_success() {
+    echo -e "${GREEN}✓ $1${NC}"
+}
+
+echo_info() {
+    echo -e "${CYAN}ℹ $1${NC}"
+}
+
+# List all available images
+list_images() {
+    echo_info "Available devices:"
+    echo ""
+
+    # List devices from devices.yml
+    local device_count
+    device_count=$(yq '.devices | length' "$WORKDIR_ROOT/devices.yml")
+
+    for i in $(seq 0 $((device_count - 1))); do
+        local dev_id dev_name dev_arch dev_pkg_id dev_power
+        dev_id=$(yq ".devices[$i].id" "$WORKDIR_ROOT/devices.yml")
+        dev_name=$(yq ".devices[$i].name" "$WORKDIR_ROOT/devices.yml")
+        dev_arch=$(yq ".devices[$i].arch" "$WORKDIR_ROOT/devices.yml")
+        dev_pkg_id=$(yq ".devices[$i].pkg_device_id" "$WORKDIR_ROOT/devices.yml")
+        dev_power=$(fetch_device_power "$dev_pkg_id")
+
+        echo "  $dev_id  ($dev_name, power=$dev_power, arch=$dev_arch)"
+
+        # List distros
+        local distro_count
+        distro_count=$(yq ".devices[$i].distros | length" "$WORKDIR_ROOT/devices.yml")
+        local distro_list=""
+        for j in $(seq 0 $((distro_count - 1))); do
+            local did
+            did=$(yq ".devices[$i].distros[$j].id" "$WORKDIR_ROOT/devices.yml")
+            distro_list="${distro_list}${did} "
+        done
+        echo "    Distros: $(echo $distro_list | xargs | tr ' ' ', ')"
+
+        # List output formats
+        local output_list
+        output_list=$(yq ".devices[$i].output[]" "$WORKDIR_ROOT/devices.yml" | tr '\n' ', ' | sed 's/, $//')
+        echo "    Output:  $output_list"
+
+        # List available services (device-specific + shared)
+        local SERVICES_LIST=""
+        # Device-specific services
+        for service_dir in "devices/$dev_id/services/"*/; do
+            if [ -d "$service_dir" ]; then
+                local sname
+                sname=$(basename "$service_dir")
+                [ "$sname" = "base" ] && continue
+                SERVICES_LIST="${SERVICES_LIST}${sname} "
+            fi
+        done
+        # Shared services
+        for service_dir in services/*/; do
+            if [ -d "$service_dir" ]; then
+                local sname
+                sname=$(basename "$service_dir")
+                # Skip if already listed from device-specific
+                if [[ ! " $SERVICES_LIST " =~ " $sname " ]]; then
+                    SERVICES_LIST="${SERVICES_LIST}${sname} "
+                fi
+            fi
+        done
+
+        if [ -n "$SERVICES_LIST" ]; then
+            echo "    Services: $(echo $SERVICES_LIST | xargs | tr ' ' ', ')"
+        fi
+
+        echo ""
+    done
+
+    echo_info "Image name format:"
+    echo "  <device>/<distro>/<services>   ex: rpi4/debian/default+emulations"
+    echo "  <device>/<services>            ex: rpi4/default+emulations (1st distro)"
+    echo ""
+    echo_info "Examples:"
+    echo "  ./bin/autobuild --image rpi4/default+emulations"
+    echo "  ./bin/autobuild --image switch/ubuntu/default+emulations+desktop"
+    echo "  ./bin/autobuild --image rpi5/debian/default+emulations"
+    echo ""
+}
+
+# Parse image name to extract device, distro, and services
+# Format: device/distro/services or device/services (1st distro default)
+# Returns: DEVICE_ID|DISTRO_ID|SERVICES|IMG_BASE_NAME
+parse_image_name() {
+    local img_name="$1"
+    local P_DEVICE=""
+    local P_DISTRO=""
+    local P_SERVICES=""
+    local P_IMG_BASE_NAME=""
+
+    local slash_count
+    slash_count=$(echo "$img_name" | tr -cd '/' | wc -c)
+
+    if [ "$slash_count" -eq 2 ]; then
+        # Format: device/distro/services
+        P_DEVICE=$(echo "$img_name" | cut -d'/' -f1)
+        P_DISTRO=$(echo "$img_name" | cut -d'/' -f2)
+        local services_part=$(echo "$img_name" | cut -d'/' -f3)
+        P_SERVICES=$(echo "$services_part" | tr '+' ' ')
+        P_IMG_BASE_NAME="${P_DEVICE}-${P_DISTRO}-$(echo "$services_part" | tr '+' '-')"
+    elif [ "$slash_count" -eq 1 ]; then
+        # Format: device/services OR device/distro
+        P_DEVICE=$(echo "$img_name" | cut -d'/' -f1)
+        local second_part=$(echo "$img_name" | cut -d'/' -f2)
+
+        # Check if second part is a distro ID in devices.yml
+        local is_distro
+        is_distro=$(yq ".devices[] | select(.id == \"$P_DEVICE\") | .distros[] | select(.id == \"$second_part\") | .id" "$WORKDIR_ROOT/devices.yml" 2>/dev/null || true)
+
+        if [ -n "$is_distro" ] && [ "$is_distro" != "null" ]; then
+            # It's device/distro (no services beyond base)
+            P_DISTRO="$second_part"
+            P_SERVICES=""
+            P_IMG_BASE_NAME="${P_DEVICE}-${P_DISTRO}"
+        else
+            # It's device/services (use 1st distro)
+            P_DISTRO=$(get_device_field "$P_DEVICE" ".distros[0].id")
+            P_SERVICES=$(echo "$second_part" | tr '+' ' ')
+            P_IMG_BASE_NAME="${P_DEVICE}-$(echo "$second_part" | tr '+' '-')"
+        fi
+    else
+        # No slash - just a device name
+        P_DEVICE="$img_name"
+        P_DISTRO=$(get_device_field "$P_DEVICE" ".distros[0].id")
+        P_SERVICES=""
+        P_IMG_BASE_NAME="$P_DEVICE"
+    fi
+
+    echo "$P_DEVICE|$P_DISTRO|$P_SERVICES|$P_IMG_BASE_NAME"
+}
+
+# Load image configuration from devices.yml + device config.sh
+load_image_config() {
+    local img_name="$1"
+
+    # Parse image name: device/distro/services or device/services
+    local parsed=$(parse_image_name "$img_name")
+    DEVICE_ID=$(echo "$parsed" | cut -d'|' -f1)
+    DISTRO_ID=$(echo "$parsed" | cut -d'|' -f2)
+    local PARSED_SERVICES=$(echo "$parsed" | cut -d'|' -f3)
+    local IMG_BASE_NAME=$(echo "$parsed" | cut -d'|' -f4)
+
+    # Verify device exists in devices.yml
+    local dev_name
+    dev_name=$(get_device_field "$DEVICE_ID" ".name" 2>/dev/null)
+    if [ -z "$dev_name" ] || [ "$dev_name" = "null" ]; then
+        echo_error "Device '$DEVICE_ID' not found in devices.yml"
+        echo ""
+        list_images
+        exit 1
+    fi
+
+    # Verify device directory exists
+    if [ ! -d "devices/$DEVICE_ID" ]; then
+        echo_error "Device directory 'devices/$DEVICE_ID' not found"
+        exit 1
+    fi
+
+    # Load device fields from devices.yml
+    DEVICE_ARCH=$(get_device_field "$DEVICE_ID" ".arch")
+    DEVICE_USER=$(get_device_field "$DEVICE_ID" ".user")
+    PKG_DEVICE_ID=$(get_device_field "$DEVICE_ID" ".pkg_device_id")
+
+    # Fetch power score from astralemu-packages (source of truth)
+    DEVICE_POWER=$(fetch_device_power "$PKG_DEVICE_ID")
+
+    # DATA_ROOT defaults to /home/$DEVICE_USER if not specified in devices.yml
+    DATA_ROOT=$(get_device_field "$DEVICE_ID" ".data_root")
+    if [ -z "$DATA_ROOT" ] || [ "$DATA_ROOT" = "null" ]; then
+        DATA_ROOT="/home/$DEVICE_USER"
+    fi
+    QEMU_RAM=$(get_device_field "$DEVICE_ID" ".qemu.ram")
+    QEMU_CPUS=$(get_device_field "$DEVICE_ID" ".qemu.cpus")
+    QEMU_CPU=$(get_device_field "$DEVICE_ID" ".qemu.cpu")
+    IMAGE_SIZE=$(get_device_field "$DEVICE_ID" ".qemu.image_size")
+
+    # Load base_image_url from distro in devices.yml
+    IMAGE_URL=$(get_distro_field "$DEVICE_ID" "$DISTRO_ID" ".base_image_url")
+    BUILD_FORMAT=$(get_distro_field "$DEVICE_ID" "$DISTRO_ID" ".build_format")
+
+    # Set CLOUD based on build_format
+    if [ "$BUILD_FORMAT" = "cloud-init" ]; then
+        CLOUD=true
+    else
+        CLOUD=false
+    fi
+
+    echo_info "Device: $DEVICE_ID ($dev_name)"
+    echo "  Distro: $DISTRO_ID (build_format: $BUILD_FORMAT)"
+    echo "  Power: $DEVICE_POWER | Arch: $DEVICE_ARCH"
+    echo "  User: $DEVICE_USER | Data: $DATA_ROOT | Packages: $PKG_DEVICE_ID"
+
+    # Load device-specific config.sh (for extra variables like RASPIOS_URL, part sizes, etc.)
+    if [ -f "devices/$DEVICE_ID/config.sh" ]; then
+        echo_info "Loading device config from devices/$DEVICE_ID/config.sh"
+        source "devices/$DEVICE_ID/config.sh"
+    fi
+
+    # Export device variables for services
+    export DEVICE_ID DEVICE_POWER DEVICE_ARCH DISTRO_ID DEVICE_USER DATA_ROOT PKG_DEVICE_ID BUILD_FORMAT
+
+    # Get base services from device config (always included)
+    local BASE_SERVICES="${SERVICES:-base}"
+
+    # Override with dynamic services if specified
+    if [ -n "$PARSED_SERVICES" ]; then
+        echo_info "Building with services: $PARSED_SERVICES"
+
+        # Verify all requested services exist (device-specific or shared)
+        for service in $PARSED_SERVICES; do
+            local service_path
+            service_path=$(resolve_service_path "$DEVICE_ID" "$service")
+            if [ -z "$service_path" ]; then
+                echo_error "Service '$service' not found for device '$DEVICE_ID'"
+                echo "  Checked: devices/$DEVICE_ID/services/$service and services/$service"
+                exit 1
+            fi
+        done
+
+        # Combine base services with user-specified services
+        local ALL_SERVICES=""
+        local SEEN_SERVICES=""
+
+        for service in $BASE_SERVICES; do
+            ALL_SERVICES="$ALL_SERVICES$service "
+            SEEN_SERVICES="$SEEN_SERVICES$service "
+        done
+
+        for service in $PARSED_SERVICES; do
+            if [[ ! " $SEEN_SERVICES " =~ " $service " ]]; then
+                ALL_SERVICES="$ALL_SERVICES$service "
+            fi
+        done
+
+        SERVICES=$(echo "$ALL_SERVICES" | xargs)
+    else
+        SERVICES="$BASE_SERVICES"
+    fi
+
+    # Generate output image name
+    OUTPUT_IMAGE="${IMG_BASE_NAME}.img"
+    DESCRIPTION="$DEVICE_ID/$DISTRO_ID with services: $(echo $SERVICES | tr ' ' '+')"
+
+    # Create virtual image directory for dynamic builds in /tmp
+    TEMP_IMAGE_DIR=$(mktemp -d -t "astralemu-build-${IMG_BASE_NAME}.XXXXXX")
+    local img_dir="$TEMP_IMAGE_DIR"
+
+    echo_info "Using temporary directory: $TEMP_IMAGE_DIR"
+
+    # Create virtual config.sh in the temporary directory
+    cat > "$img_dir/config.sh" << EOF
+# Auto-generated config for dynamic image build
+OUTPUT_IMAGE="$OUTPUT_IMAGE"
+IMAGE_SIZE="$IMAGE_SIZE"
+QEMU_RAM="$QEMU_RAM"
+QEMU_CPUS="$QEMU_CPUS"
+QEMU_CPU="$QEMU_CPU"
+CLOUD=$CLOUD
+IMAGE_URL="$IMAGE_URL"
+SERVICES="$SERVICES"
+DESCRIPTION="$DESCRIPTION"
+DEVICE_ID="$DEVICE_ID"
+DEVICE_POWER="$DEVICE_POWER"
+DISTRO_ID="$DISTRO_ID"
+DEVICE_USER="$DEVICE_USER"
+DATA_ROOT="$DATA_ROOT"
+PKG_DEVICE_ID="$PKG_DEVICE_ID"
+EOF
+
+    # Also source device config into the temp dir so output modules can access it
+    if [ -f "devices/$DEVICE_ID/config.sh" ]; then
+        cat "devices/$DEVICE_ID/config.sh" >> "$img_dir/config.sh"
+    fi
+
+    CURRENT_IMAGE="$img_name"
+
+    echo_info "Configuration for '$img_name' loaded"
+    echo "  Services: ${SERVICES:-none}"
+    echo "  Output: $OUTPUT_IMAGE"
+    echo "  Size: $IMAGE_SIZE"
+    echo "  QEMU: RAM=$QEMU_RAM, CPUs=$QEMU_CPUS, CPU=$QEMU_CPU"
+    [ -n "$DESCRIPTION" ] && echo "  Description: $DESCRIPTION"
+}
+
+# Resolve service path: device-specific takes priority over shared
+# Returns: path to service directory, or empty string if not found
+resolve_service_path() {
+    local device_id="$1"
+    local service_name="$2"
+
+    # 1. Device-specific
+    if [ -d "devices/$device_id/services/$service_name" ]; then
+        echo "devices/$device_id/services/$service_name"
+        return
+    fi
+
+    # 2. Shared
+    if [ -d "services/$service_name" ]; then
+        echo "services/$service_name"
+        return
+    fi
+
+    # Not found
+    echo ""
+}
+
+# Detect genisoimage or mkisofs (they are compatible)
+detect_mkisofs() {
+    if command -v genisoimage &> /dev/null; then
+        echo "genisoimage"
+    elif command -v mkisofs &> /dev/null; then
+        echo "mkisofs"
+    else
+        echo ""
+    fi
+}
+MKISOFS_CMD=$(detect_mkisofs)
+
+# Check dependencies based on stage
+check_dependencies() {
+    local stage="$1"
+    echo_step "Checking dependencies for stage $stage..."
+    local missing=()
+    local required_cmds=()
+
+    # yq is always required
+    required_cmds=(yq)
+
+    # Determine required commands based on stage
+    case "$stage" in
+        "1")
+            # Stage 1: Download and prepare
+            required_cmds+=(wget)
+            ;;
+        "2")
+            # Stage 2: QEMU setup
+            required_cmds+=(qemu-system-aarch64)
+            ;;
+        "3"|"output")
+            # Stage 3/output: depends on output format (checked by module)
+            required_cmds+=(parted e2fsck resize2fs losetup rsync)
+            ;;
+        "all")
+            # All stages: check all dependencies
+            required_cmds+=(wget qemu-system-aarch64 parted e2fsck resize2fs losetup rsync podman)
+            ;;
+    esac
+
+    # Check required commands
+    for cmd in "${required_cmds[@]}"; do
+        if ! command -v $cmd &> /dev/null; then
+            missing+=($cmd)
+        fi
+    done
+
+    # Check genisoimage/mkisofs for stages that need ISO creation
+    if [[ "$stage" == "1" || "$stage" == "all" ]]; then
+        if [ -z "$MKISOFS_CMD" ]; then
+            missing+=("genisoimage or mkisofs")
+        fi
+    fi
+
+    if [ ${#missing[@]} -ne 0 ]; then
+        echo_error "Missing dependencies for stage $stage: ${missing[*]}"
+        echo ""
+        echo "Install commands (Debian/Ubuntu):"
+        echo "  sudo apt install -y yq wget genisoimage xz-utils qemu-system-aarch64 qemu-utils qemu-efi-aarch64 parted e2fsprogs dosfstools rsync squashfs-tools"
+        echo ""
+        echo "Install commands (Fedora/Bazzite with brew):"
+        echo "  brew install yq cdrtools"
+        exit 1
+    fi
+
+    echo_success "All required dependencies for stage $stage are installed"
+}
+
+# Detect boot mode from CLOUD variable in config.sh
+detect_boot_mode() {
+    if [ "$CLOUD" = true ]; then
+        echo "cloudinit"
+    else
+        echo "firstboot"
+    fi
+}
+
+# Compute build fingerprint from all identity files
+compute_build_fingerprint() {
+    local img_name="$1"
+    local hash_input=""
+
+    # devices.yml
+    hash_input+=$(sha256sum "$WORKDIR_ROOT/devices.yml" | cut -d' ' -f1)
+
+    # autobuild script
+    hash_input+=$(sha256sum "$WORKDIR_ROOT/bin/autobuild" | cut -d' ' -f1)
+
+    # All service files for this image (setup.sh + packages.yml + depends.sh)
+    for service in $SERVICES; do
+        local service_path
+        service_path=$(resolve_service_path "$DEVICE_ID" "$service")
+        if [ -n "$service_path" ]; then
+            for f in "$service_path/setup.sh" "$service_path/packages.yml" "$service_path/depends.sh"; do
+                [ -f "$f" ] && hash_input+=$(sha256sum "$f" | cut -d' ' -f1)
+            done
+        fi
+    done
+
+    # prepare service (always included via concatenation)
+    local prepare_path
+    prepare_path=$(resolve_service_path "$DEVICE_ID" "prepare")
+    if [ -n "$prepare_path" ]; then
+        for f in "$prepare_path/setup.sh" "$prepare_path/packages.yml"; do
+            [ -f "$f" ] && hash_input+=$(sha256sum "$f" | cut -d' ' -f1)
+        done
+    fi
+
+    # Device config.sh
+    [ -f "devices/$DEVICE_ID/config.sh" ] && hash_input+=$(sha256sum "devices/$DEVICE_ID/config.sh" | cut -d' ' -f1)
+
+    # Remote devices.yml from astralemu-packages (power scores affect emulator selection)
+    if [ -n "$PACKAGES_DEVICES_CACHE" ] && [ -f "$PACKAGES_DEVICES_CACHE" ]; then
+        hash_input+=$(sha256sum "$PACKAGES_DEVICES_CACHE" | cut -d' ' -f1)
+    fi
+
+    echo "$hash_input" | sha256sum | cut -d' ' -f1
+}
+
+# Upgrade packages in cached work-image via chroot (no QEMU)
+run_upgrade_only() {
+    local img_name="$1"
+
+    echo_step "Upgrading packages in cached work-image (chroot)..."
+
+    if [ ! -f "$WORK_IMAGE" ]; then
+        echo_error "--upgrade-only requires existing work-image.raw"
+        exit 1
+    fi
+
+    LOOP_DEV=$(sudo losetup -fP --show "$WORK_IMAGE")
+
+    # Find rootfs partition
+    ROOT_PART=""
+    for part in ${LOOP_DEV}p*; do
+        if [ -b "$part" ]; then
+            FS_TYPE=$(sudo blkid -s TYPE -o value "$part" 2>/dev/null || true)
+            if [ "$FS_TYPE" = "ext4" ]; then
+                ROOT_PART="$part"
+                break
+            fi
+        fi
+    done
+
+    if [ -z "$ROOT_PART" ]; then
+        echo_error "Cannot find ext4 rootfs in work-image"
+        sudo losetup -d "$LOOP_DEV"
+        exit 1
+    fi
+
+    MOUNT_DIR=$(mktemp -d)
+    sudo mount "$ROOT_PART" "$MOUNT_DIR"
+
+    # Setup chroot environment
+    sudo mount --bind /proc "$MOUNT_DIR/proc"
+    sudo mount --bind /sys "$MOUNT_DIR/sys"
+    sudo mount --bind /dev "$MOUNT_DIR/dev"
+    sudo mount --bind /dev/pts "$MOUNT_DIR/dev/pts"
+    sudo cp /etc/resolv.conf "$MOUNT_DIR/etc/resolv.conf"
+
+    # Detect package manager and upgrade
+    sudo chroot "$MOUNT_DIR" /bin/bash -c '
+        export DEBIAN_FRONTEND=noninteractive
+        if command -v apt &>/dev/null; then
+            apt update && apt upgrade -y && apt autoremove -y --purge && apt clean
+            rm -rf /var/lib/apt/lists/*
+        elif command -v dnf &>/dev/null; then
+            dnf upgrade -y && dnf autoremove -y && dnf clean all
+        elif command -v pacman &>/dev/null; then
+            pacman -Syu --noconfirm && pacman -Sc --noconfirm
+        fi
+        date > /root/upgrade-completed
+    '
+
+    # Cleanup chroot mounts
+    sudo umount "$MOUNT_DIR/dev/pts" 2>/dev/null || true
+    sudo umount "$MOUNT_DIR/dev" 2>/dev/null || true
+    sudo umount "$MOUNT_DIR/sys" 2>/dev/null || true
+    sudo umount "$MOUNT_DIR/proc" 2>/dev/null || true
+    sudo umount "$MOUNT_DIR"
+    sudo losetup -d "$LOOP_DEV"
+    rm -rf "$MOUNT_DIR"
+
+    echo_success "Package upgrade completed"
+}
+
+# Inject first-boot service into distro image (for CLOUD=false)
+inject_firstboot_service() {
+    local IMG_NAME="$1"
+    local IMG_DIR="devices/$IMG_NAME"
+    local DISTRO=$(echo "$IMG_NAME" | cut -d'/' -f1)
+    local FIRSTBOOT_DIR="devices/$DISTRO/first-boot"
+
+    echo "  Injecting first-boot service into distribution image..."
+
+    # Verify first-boot files exist in distro directory
+    if [ ! -f "$FIRSTBOOT_DIR/setup-runner.sh" ] || [ ! -f "$FIRSTBOOT_DIR/setup-runner.service" ]; then
+        echo_error "Missing files in $FIRSTBOOT_DIR/"
+        echo "Required: setup-runner.sh, setup-runner.service"
+        exit 1
+    fi
+
+    # Find partition in distro image
+    LOOP_DEV=$(sudo losetup -fP --show "$WORK_IMAGE")
+
+    # Detect rootfs partition (ext4 filesystem)
+    ROOT_PART=""
+    for part in ${LOOP_DEV}p*; do
+        if [ -b "$part" ]; then
+            FS_TYPE=$(sudo blkid -s TYPE -o value "$part" 2>/dev/null || true)
+            if [ "$FS_TYPE" = "ext4" ]; then
+                ROOT_PART="$part"
+                echo "  Found rootfs on $(basename $part) (ext4)"
+                break
+            fi
+        fi
+    done
+
+    if [ -z "$ROOT_PART" ]; then
+        echo_error "Cannot find ext4 rootfs partition in $WORK_IMAGE"
+        sudo losetup -d "$LOOP_DEV"
+        exit 1
+    fi
+
+    # Mount image
+    MOUNT_DIR=$(mktemp -d)
+    sudo mount "$ROOT_PART" "$MOUNT_DIR"
+
+    # Copy first-boot files
+    sudo cp "$FIRSTBOOT_DIR/setup-runner.sh" "$MOUNT_DIR/root/setup-runner.sh"
+    sudo chmod +x "$MOUNT_DIR/root/setup-runner.sh"
+    sudo cp "$FIRSTBOOT_DIR/setup-runner.service" "$MOUNT_DIR/etc/systemd/system/setup-runner.service"
+
+    # Enable service using chroot
+    sudo chroot "$MOUNT_DIR" systemctl enable setup-runner.service 2>/dev/null || true
+
+    # Cleanup
+    sudo umount "$MOUNT_DIR"
+    sudo losetup -d "$LOOP_DEV"
+    rm -rf "$MOUNT_DIR"
+
+    echo_success "First-boot service injected and enabled"
+}
+
+# Download base images
+download_images() {
+    local IMG_NAME="$1"
+    local IMG_DIR=$(get_image_dir "$IMG_NAME")
+    local DEVICE_DIR="devices/$DEVICE_ID"
+
+    echo_step "Downloading base images..."
+
+    # Get IMAGE_URL from config (set by load_image_config from devices.yml)
+    if [ -z "$IMAGE_URL" ]; then
+        echo_error "IMAGE_URL not defined (check devices.yml distro base_image_url)"
+        exit 1
+    fi
+
+    # Determine download filename from URL
+    local DOWNLOAD_FILENAME
+    DOWNLOAD_FILENAME=$(basename "$IMAGE_URL")
+
+    # Download distribution image if needed
+    if [ ! -f "$DOWNLOAD_FILENAME" ]; then
+        echo "  Downloading base distribution image..."
+        echo "  URL: $IMAGE_URL"
+        wget -c "$IMAGE_URL" -O "$DOWNLOAD_FILENAME"
+    else
+        echo_success "Base distribution image already present ($DOWNLOAD_FILENAME)"
+    fi
+
+    # Copy to working image (handle tarball, qcow2, raw)
+    echo "  Preparing work image: $WORK_IMAGE..."
+    rm -f "$WORK_IMAGE"
+    if [[ "$DOWNLOAD_FILENAME" == *.tar.gz ]] || [[ "$DOWNLOAD_FILENAME" == *.tar.xz ]]; then
+        echo "  Creating raw image from tarball..."
+        qemu-img create -f raw "$WORK_IMAGE" "$IMAGE_SIZE"
+        parted -s "$WORK_IMAGE" mklabel msdos
+        parted -s "$WORK_IMAGE" mkpart primary ext4 1MiB 100%
+        LOOP_DEV=$(sudo losetup -fP --show "$WORK_IMAGE")
+        sudo mkfs.ext4 -q "${LOOP_DEV}p1"
+        MOUNT_DIR=$(mktemp -d)
+        sudo mount "${LOOP_DEV}p1" "$MOUNT_DIR"
+        echo "  Extracting tarball..."
+        sudo tar xf "$DOWNLOAD_FILENAME" -C "$MOUNT_DIR"
+        sudo umount "$MOUNT_DIR"
+        sudo losetup -d "$LOOP_DEV"
+        rm -rf "$MOUNT_DIR"
+    elif file "$DOWNLOAD_FILENAME" | grep -q "QCOW"; then
+        echo "  Converting qcow2 to raw..."
+        qemu-img convert -f qcow2 -O raw "$DOWNLOAD_FILENAME" "$WORK_IMAGE"
+    else
+        cp "$DOWNLOAD_FILENAME" "$WORK_IMAGE"
+    fi
+
+    # Detect boot mode from CLOUD variable
+    BOOT_MODE=$(detect_boot_mode)
+    echo "  Boot mode: $BOOT_MODE (CLOUD=$CLOUD)"
+
+    if [ "$BOOT_MODE" = "cloudinit" ]; then
+        echo "  Using cloud-init boot mode..."
+
+        # Generate cloud-init from devices.yml (DEVICE_USER is the source of truth)
+        local CLOUDINIT_DIR="$TEMP_IMAGE_DIR/cloudinit"
+        mkdir -p "$CLOUDINIT_DIR"
+
+        # Use device-specific meta-data if available, otherwise generate
+        if [ -f "$DEVICE_DIR/cloudinit/meta-data" ]; then
+            cp "$DEVICE_DIR/cloudinit/meta-data" "$CLOUDINIT_DIR/meta-data"
+        else
+            cat > "$CLOUDINIT_DIR/meta-data" << EOF
+instance-id: astralemu-build
+local-hostname: astralemu
+EOF
+        fi
+
+        # Generate user-data from DEVICE_USER (single source of truth)
+        cat > "$CLOUDINIT_DIR/user-data" << EOF
+#cloud-config
+users:
+  - name: $DEVICE_USER
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    shell: /bin/bash
+    lock_passwd: false
+
+chpasswd:
+  list: |
+    $DEVICE_USER:$DEVICE_USER
+    root:root
+  expire: false
+
+ssh_pwauth: true
+
+runcmd:
+  - echo "=== Cloud-init starting setup ==="
+  - mkdir -p /mnt/setup
+  - |
+    for dev in /dev/vdc /dev/sr0 /dev/sr1 /dev/cdrom; do
+      if [ -b "\$dev" ]; then
+        if mount -o ro "\$dev" /mnt/setup 2>/dev/null; then
+          break
+        fi
+      fi
+    done
+  - mkdir -p /etc/setupfiles
+  - cp -r /mnt/setup/setupfiles/* /etc/setupfiles/ 2>/dev/null || true
+  - |
+    if [ -x /mnt/setup/setup ]; then
+      /mnt/setup/setup 2>&1 | tee /var/log/astralemu-setup.log
+    else
+      echo "ERROR: /mnt/setup/setup not found!"
+    fi
+  - umount /mnt/setup || true
+  - poweroff
+EOF
+        echo "  Generated cloud-init for user '$DEVICE_USER'"
+
+        echo "  Generating cloud-init seed.img..."
+        local SEED_IMG_PATH="$CLOUDINIT_DIR/seed.img"
+        rm -f "$SEED_IMG_PATH"
+        $MKISOFS_CMD -quiet -output "$SEED_IMG_PATH" \
+            -volid cidata \
+            -joliet -rock \
+            "$CLOUDINIT_DIR/user-data" \
+            "$CLOUDINIT_DIR/meta-data"
+        echo_success "cloud-init seed.img generated at $SEED_IMG_PATH"
+    else
+        echo "  Using first-boot service mode (no cloud-init)..."
+        inject_firstboot_service "$IMG_NAME"
+    fi
+
+    echo_success "Base images ready"
+}
+
+# Get the correct image directory (temp for dynamic builds)
+get_image_dir() {
+    local img_name="$1"
+
+    # If TEMP_IMAGE_DIR is set (dynamic image), use it
+    if [ -n "$TEMP_IMAGE_DIR" ] && [ -d "$TEMP_IMAGE_DIR" ]; then
+        echo "$TEMP_IMAGE_DIR"
+    else
+        echo "devices/$DEVICE_ID"
+    fi
+}
+
+# Build setup from modular services
+build_services_setup() {
+    local img_name="$1"
+    local img_dir=$(get_image_dir "$img_name")
+
+    echo_step "Building setup from modular services for '$img_name'..."
+
+    # Load SERVICES from config.sh
+    source "$img_dir/config.sh"
+
+    if [ -z "$SERVICES" ]; then
+        echo_error "SERVICES variable not defined in config.sh"
+        exit 1
+    fi
+
+    echo "  Services to combine: $SERVICES"
+
+    # Resolve service dependencies and order them correctly
+    # Uses 2-level resolution: device-specific then shared
+    local final_services=""
+    local processed_services=""
+
+    # Helper function to recursively resolve dependencies in correct order
+    resolve_dependencies() {
+        local service="$1"
+
+        # Skip if already processed
+        if echo " $processed_services " | grep -q " $service "; then
+            return
+        fi
+
+        # Resolve service path (device-specific or shared)
+        local service_path
+        service_path=$(resolve_service_path "$DEVICE_ID" "$service")
+
+        if [ -z "$service_path" ]; then
+            echo_error "Service '$service' not found for device '$DEVICE_ID'"
+            echo "  Checked: devices/$DEVICE_ID/services/$service and services/$service"
+            exit 1
+        fi
+
+        # Load dependencies if exists
+        local depends_file="$service_path/depends.sh"
+        local DEPENDS_ON=""
+
+        if [ -f "$depends_file" ]; then
+            source "$depends_file"
+        fi
+
+        # First, recursively resolve all dependencies
+        if [ -n "$DEPENDS_ON" ]; then
+            echo "  Service '$service' depends on: $DEPENDS_ON"
+            for dep in $DEPENDS_ON; do
+                resolve_dependencies "$dep"
+            done
+        fi
+
+        # Then add this service (after all its dependencies)
+        processed_services="$processed_services $service"
+        final_services="$final_services $service"
+    }
+
+    # Process all services in order: base services first, then additional ones
+    for service in $SERVICES; do
+        resolve_dependencies "$service"
+    done
+
+    # Remove leading/trailing spaces and update SERVICES
+    SERVICES=$(echo "$final_services" | xargs)
+    echo "  Final service list with dependencies: $SERVICES"
+
+    # Create temporary directory for combined setup
+    COMBINED_DIR=$(mktemp -d)
+    mkdir -p "$COMBINED_DIR/setupfiles"
+
+    # Initialize combined setup.sh with device variables (EOF unquoted for expansion)
+    cat > "$COMBINED_DIR/setup.sh" << EOF
+#!/bin/bash
+set -e
+
+# ============================================================================
+# Auto-generated setup script — variables from devices.yml
+# ============================================================================
+
+export DEVICE_ID="$DEVICE_ID"
+export DEVICE_POWER="$DEVICE_POWER"
+export DEVICE_ARCH="$DEVICE_ARCH"
+export DISTRO_ID="$DISTRO_ID"
+export DEVICE_USER="$DEVICE_USER"
+export DEVICE_HOME="/home/$DEVICE_USER"
+export DATA_ROOT="$DATA_ROOT"
+export PKG_DEVICE_ID="$PKG_DEVICE_ID"
+
+echo "======================================"
+echo "Starting rootfs configuration"
+echo "Device: $DEVICE_ID (power=$DEVICE_POWER, arch=$DEVICE_ARCH)"
+echo "User: $DEVICE_USER | Data: $DATA_ROOT | Packages: $PKG_DEVICE_ID"
+echo "======================================"
+
+EOF
+
+    # Combine setup.sh from each service (2-level resolution)
+    for service in $SERVICES; do
+        local service_path
+        service_path=$(resolve_service_path "$DEVICE_ID" "$service")
+
+        if [ -z "$service_path" ]; then
+            echo_error "Service '$service' not found"
+            rm -rf "$COMBINED_DIR"
+            exit 1
+        fi
+
+        if [ -f "$service_path/setup.sh" ]; then
+            echo "  Adding service: $service (from $service_path)"
+
+            # Append service setup (skip shebang and set -e lines)
+            tail -n +3 "$service_path/setup.sh" >> "$COMBINED_DIR/setup.sh"
+            echo "" >> "$COMBINED_DIR/setup.sh"
+        fi
+
+        # Copy setupfiles from service
+        if [ -d "$service_path/setupfiles" ]; then
+            cp -r "$service_path/setupfiles/"* "$COMBINED_DIR/setupfiles/" 2>/dev/null || true
+        fi
+
+        # Copy motd.sh to motd.d if it exists
+        if [ -f "$service_path/motd.sh" ]; then
+            mkdir -p "$COMBINED_DIR/setupfiles/motd.d"
+            cp "$service_path/motd.sh" "$COMBINED_DIR/setupfiles/motd.d/${service}.sh" 2>/dev/null || true
+        fi
+
+        # Copy service packages.yml for pkg_service_install()
+        if [ -f "$service_path/packages.yml" ]; then
+            mkdir -p "$COMBINED_DIR/setupfiles/packages"
+            cp "$service_path/packages.yml" "$COMBINED_DIR/setupfiles/packages/${service}.yml"
+        fi
+    done
+
+    # Add cleanup and completion at the end
+    cat >> "$COMBINED_DIR/setup.sh" << 'EOF'
+
+# Cleanup
+echo "Cleaning up..."
+pkg_clean
+
+# Create flag file to indicate setup is complete
+echo "Finalizing..."
+touch /root/setup-completed
+date > /root/setup-completed
+
+echo "======================================"
+echo "Configuration completed successfully!"
+echo "======================================"
+EOF
+
+    # Build services-first-boot.sh from service first-boot scripts
+    SERVICES_FIRSTBOOT="$COMBINED_DIR/setupfiles/services-first-boot.sh"
+
+    # Find services-first-boot.sh from base service (2-level)
+    local base_path
+    base_path=$(resolve_service_path "$DEVICE_ID" "base")
+    if [ -n "$base_path" ] && [ -f "$base_path/setupfiles/services-first-boot.sh" ]; then
+        cp "$base_path/setupfiles/services-first-boot.sh" "$SERVICES_FIRSTBOOT"
+    else
+        echo_error "Base services-first-boot.sh not found"
+        rm -rf "$COMBINED_DIR"
+        exit 1
+    fi
+
+    # Inject device variables into the first-boot script (after set -e)
+    local fb_vars_file
+    fb_vars_file=$(mktemp)
+    cat > "$fb_vars_file" << FBVARS
+
+# Device variables (injected by autobuild)
+export DEVICE_USER="$DEVICE_USER"
+export DEVICE_HOME="/home/$DEVICE_USER"
+export DATA_ROOT="$DATA_ROOT"
+
+FBVARS
+    sed -i "/^set -e$/r $fb_vars_file" "$SERVICES_FIRSTBOOT"
+    rm -f "$fb_vars_file"
+
+    # Copy devices.yml into setupfiles so services can read it inside QEMU
+    cp "$WORKDIR_ROOT/devices.yml" "$COMBINED_DIR/setupfiles/devices.yml"
+
+    # Inject first-boot init scripts from services (2-level resolution)
+    for service in $SERVICES; do
+        local service_path
+        service_path=$(resolve_service_path "$DEVICE_ID" "$service")
+        local service_firstboot="$service_path/first-boot/init.sh"
+
+        if [ -f "$service_firstboot" ]; then
+            echo "  Adding first-boot init: $service"
+
+            # Create a temporary file with the service header and content
+            SERVICE_CONTENT=$(mktemp)
+            echo "" >> "$SERVICE_CONTENT"
+            echo "# ------ $service service ------" >> "$SERVICE_CONTENT"
+            cat "$service_firstboot" >> "$SERVICE_CONTENT"
+            echo "" >> "$SERVICE_CONTENT"
+
+            # Insert before END marker using a more robust method
+            awk -v content="$SERVICE_CONTENT" '
+                /# ====== END SERVICES INITIALIZATION ======/ {
+                    while ((getline line < content) > 0) {
+                        print line
+                    }
+                    close(content)
+                }
+                { print }
+            ' "$SERVICES_FIRSTBOOT" > "${SERVICES_FIRSTBOOT}.tmp"
+
+            mv "${SERVICES_FIRSTBOOT}.tmp" "$SERVICES_FIRSTBOOT"
+            rm -f "$SERVICE_CONTENT"
+        fi
+    done
+
+    # Copy generated files to image directory
+    mkdir -p "$img_dir"
+    cp "$COMBINED_DIR/setup.sh" "$img_dir/setup.sh"
+    rm -rf "$img_dir/setupfiles"
+    cp -r "$COMBINED_DIR/setupfiles" "$img_dir/setupfiles"
+
+    # Cleanup
+    rm -rf "$COMBINED_DIR"
+
+    echo_success "Setup built from services: $SERVICES"
+}
+
+# Create setup.iso for an image
+create_setup_iso() {
+    local img_name="$1"
+    local img_dir=$(get_image_dir "$img_name")
+    local DEVICE_DIR="devices/$DEVICE_ID"
+
+    # Always build services setup (all AstralEmu images use services)
+    build_services_setup "$img_name"
+
+    # Store setup.iso in device directory (persistent across stages)
+    local SETUP_ISO_PATH="$DEVICE_DIR/setup.iso"
+    echo_step "Creating $DEVICE_DIR/setup.iso for '$img_name'..."
+
+    rm -f "$SETUP_ISO_PATH"
+
+    # Verify files exist
+    if [ ! -f "$img_dir/setup.sh" ]; then
+        echo_error "$img_dir/setup.sh not found!"
+        exit 1
+    fi
+
+    if [ ! -d "$img_dir/setupfiles" ]; then
+        echo_warn "$img_dir/setupfiles/ not found, creating empty directory"
+        mkdir -p "$img_dir/setupfiles"
+    fi
+
+    # Create temporary directory for ISO
+    SETUP_ISO_DIR=$(mktemp -d)
+
+    # Copy setup.sh as "setup" (without extension)
+    cp "$img_dir/setup.sh" "$SETUP_ISO_DIR/setup"
+    chmod +x "$SETUP_ISO_DIR/setup"
+
+    # Copy setupfiles
+    cp -r "$img_dir/setupfiles" "$SETUP_ISO_DIR/setupfiles"
+
+    # Create ISO (use -graft-points to preserve directory structure)
+    $MKISOFS_CMD -quiet -output "$SETUP_ISO_PATH" -volid "SETUP" -joliet -joliet-long -rock -graft-points \
+        /setup="$SETUP_ISO_DIR/setup" \
+        /setupfiles="$SETUP_ISO_DIR/setupfiles"
+
+    # Cleanup
+    rm -rf "$SETUP_ISO_DIR"
+
+    echo_success "setup.iso created at $SETUP_ISO_PATH for '$img_name'"
+}
+
+# Launch QEMU with automatic setup
+run_qemu_setup() {
+    local img_name="$1"
+    local img_dir=$(get_image_dir "$img_name")
+    local DEVICE_DIR="devices/$DEVICE_ID"
+
+    echo_step "Launching QEMU for automatic setup..."
+    echo "  Image: $CURRENT_IMAGE"
+    echo "  RAM: $QEMU_RAM | CPUs: $QEMU_CPUS | CPU: $QEMU_CPU"
+
+    # Detect boot mode
+    BOOT_MODE=$(detect_boot_mode)
+    echo "  Boot mode: $BOOT_MODE"
+    echo "  Setup will execute automatically and QEMU will shut down"
+    echo ""
+
+    # Check UEFI firmware
+    UEFI_BIOS=""
+    for fw_path in \
+        /usr/share/edk2/aarch64/QEMU_CODE.fd \
+        /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+        /usr/share/AAVMF/AAVMF_CODE.fd \
+        /usr/share/qemu/edk2-aarch64-code.fd \
+        /usr/share/edk2-ovmf/aarch64/QEMU_EFI.fd; do
+        if [ -f "$fw_path" ]; then
+            UEFI_BIOS="$fw_path"
+            break
+        fi
+    done
+
+    if [ -z "$UEFI_BIOS" ]; then
+        echo_error "ARM64 UEFI firmware not found!"
+        echo "Install with: sudo apt install qemu-efi-aarch64"
+        exit 1
+    fi
+
+    echo "  UEFI firmware: $UEFI_BIOS"
+
+    # Resize work image to final size for package installations
+    echo_step "Resizing work image for package installation..."
+    QEMU_IMAGE_SIZE="$IMAGE_SIZE"
+
+    echo "  Current image size: $(du -h "$WORK_IMAGE" | cut -f1)"
+    qemu-img resize "$WORK_IMAGE" "$QEMU_IMAGE_SIZE"
+    echo "  Image resized to: $QEMU_IMAGE_SIZE"
+
+    # Expand partition and filesystem
+    echo "  Expanding partition and filesystem..."
+    LOOP_DEV=$(sudo losetup -fP --show "$WORK_IMAGE")
+
+    # Detect rootfs partition (ext4 filesystem)
+    ROOTFS_PART=""
+    PART_NUM=""
+    for part in ${LOOP_DEV}p*; do
+        if [ -b "$part" ]; then
+            FS_TYPE=$(sudo blkid -s TYPE -o value "$part" 2>/dev/null || true)
+            if [ "$FS_TYPE" = "ext4" ]; then
+                ROOTFS_PART="$part"
+                PART_NUM=$(echo "$part" | grep -o 'p[0-9]*$' | sed 's/p//')
+                echo "  Found rootfs on partition $PART_NUM (ext4)"
+                break
+            fi
+        fi
+    done
+
+    if [ -z "$ROOTFS_PART" ]; then
+        echo_error "Cannot find ext4 rootfs partition!"
+        sudo losetup -d "$LOOP_DEV"
+        exit 1
+    fi
+
+    # Check if EFI partition exists and needs to be moved
+    if [ -b "${LOOP_DEV}p2" ] && [ "$PART_NUM" = "1" ]; then
+        echo "  Detected EFI partition p2, relocating to end of disk..."
+
+        # Get exact size of original EFI partition
+        EFI_SIZE_SECTORS=$(sudo blockdev --getsz "${LOOP_DEV}p2")
+        EFI_SIZE_BYTES=$(sudo blockdev --getsize64 "${LOOP_DEV}p2")
+        EFI_SIZE_MB=$((EFI_SIZE_BYTES / 1024 / 1024))
+        echo "  Original EFI partition size: ${EFI_SIZE_MB}MB (${EFI_SIZE_SECTORS} sectors)"
+
+        # Backup EFI partition (bit-for-bit copy)
+        EFI_BACKUP=$(mktemp)
+        echo "  Creating bit-for-bit backup of EFI partition..."
+        sudo dd if="${LOOP_DEV}p2" of="$EFI_BACKUP" bs=1M status=none
+        echo "  EFI partition backed up to temporary file"
+
+        # Get total disk size
+        DISK_SIZE_BYTES=$(sudo blockdev --getsize64 "$LOOP_DEV")
+        DISK_SIZE_MB=$((DISK_SIZE_BYTES / 1024 / 1024))
+
+        # Calculate new partition boundaries (leave exact space for EFI at the end)
+        ROOTFS_END_MB=$((DISK_SIZE_MB - EFI_SIZE_MB - 1))
+        EFI_START_MB=$((ROOTFS_END_MB + 1))
+
+        echo "  Disk layout: rootfs 0-${ROOTFS_END_MB}MB, EFI ${EFI_START_MB}MB-${DISK_SIZE_MB}MB"
+
+        # Remove EFI partition
+        echo "  Removing old EFI partition..."
+        sudo parted --script "$LOOP_DEV" rm 2 2>/dev/null || true
+
+        # Resize rootfs partition to leave space for EFI
+        echo "  Resizing rootfs to ${ROOTFS_END_MB}MB..."
+        sudo parted --script "$LOOP_DEV" resizepart 1 ${ROOTFS_END_MB}MB 2>/dev/null || true
+
+        # Recreate EFI partition at the end with exact original size
+        echo "  Recreating EFI partition at end with original size..."
+        sudo parted --script "$LOOP_DEV" mkpart primary fat32 ${EFI_START_MB}MB 100% 2>/dev/null || true
+        sudo parted --script "$LOOP_DEV" set 2 esp on 2>/dev/null || true
+
+        # Reload partition table
+        sudo partprobe "$LOOP_DEV" 2>/dev/null || true
+        sleep 1
+
+        # Restore EFI partition (bit-for-bit restore)
+        echo "  Restoring EFI partition from backup..."
+        sudo dd if="$EFI_BACKUP" of="${LOOP_DEV}p2" bs=1M status=none
+        rm -f "$EFI_BACKUP"
+        echo "  EFI partition restored successfully"
+
+        echo "  EFI partition relocated successfully"
+    else
+        # No EFI partition or rootfs is not p1, simple resize
+        echo "  Resizing partition $PART_NUM to 100%..."
+        sudo parted --script "$LOOP_DEV" resizepart "$PART_NUM" 100% 2>/dev/null || true
+    fi
+
+    # Resize ext4 filesystem (force non-interactive mode)
+    echo "  Checking and resizing ext4 filesystem..."
+    sudo e2fsck -fp "$ROOTFS_PART" || true
+    sudo resize2fs "$ROOTFS_PART"
+
+    # Cleanup
+    sudo losetup -d "$LOOP_DEV"
+    echo_success "Distribution image resized successfully"
+    echo ""
+
+    # Resolve paths for seed.img and setup.iso
+    local SEED_IMG_PATH=""
+    local SETUP_ISO_PATH=""
+
+    if [ "$BOOT_MODE" = "cloudinit" ]; then
+        # Determine seed.img path (device dir or temp dir)
+        if [ -f "$DEVICE_DIR/cloudinit/seed.img" ]; then
+            SEED_IMG_PATH="$DEVICE_DIR/cloudinit/seed.img"
+        elif [ -f "$TEMP_IMAGE_DIR/cloudinit/seed.img" ]; then
+            SEED_IMG_PATH="$TEMP_IMAGE_DIR/cloudinit/seed.img"
+        else
+            echo_error "seed.img not found!"
+            echo "  Checked: $DEVICE_DIR/cloudinit/seed.img and $TEMP_IMAGE_DIR/cloudinit/seed.img"
+            exit 1
+        fi
+        echo "  Using seed.img: $SEED_IMG_PATH"
+    fi
+
+    # Determine setup.iso path
+    if [ -f "$DEVICE_DIR/setup.iso" ]; then
+        SETUP_ISO_PATH="$DEVICE_DIR/setup.iso"
+    elif [ -f "$img_dir/setup.iso" ]; then
+        SETUP_ISO_PATH="$img_dir/setup.iso"
+    else
+        echo_error "setup.iso not found!"
+        exit 1
+    fi
+    echo "  Using setup.iso: $SETUP_ISO_PATH"
+
+    # Detect KVM availability for native ARM64
+    local KVM_OPTS=""
+    if [ -e /dev/kvm ] && [ "$(uname -m)" = "aarch64" ]; then
+        KVM_OPTS="-accel kvm"
+        echo_success "KVM acceleration available (native ARM64)"
+    else
+        KVM_OPTS="-accel tcg,thread=multi"
+        echo_warn "Using TCG emulation (slower)"
+    fi
+
+    # Launch QEMU with appropriate drives based on boot mode
+    # Note: || true prevents script exit on QEMU errors (we only check /root/setup-completed)
+    if [ "$BOOT_MODE" = "cloudinit" ]; then
+        # Cloud-init mode: mount both seed.img and setup.iso
+        qemu-system-aarch64 \
+            -M virt \
+            -cpu "$QEMU_CPU" \
+            $KVM_OPTS \
+            -m "$QEMU_RAM" \
+            -smp "$QEMU_CPUS" \
+            -bios "$UEFI_BIOS" \
+            -drive file="$WORK_IMAGE",format=raw,if=virtio \
+            -drive file="$SEED_IMG_PATH",format=raw,if=virtio \
+            -drive file="$SETUP_ISO_PATH",format=raw,if=virtio,readonly=on \
+            -device virtio-net-pci,netdev=net0 \
+            -netdev user,id=net0 \
+            -nographic || true
+    elif [ "$BOOT_MODE" = "firstboot" ]; then
+        # First-boot mode: mount only setup.iso (service is already injected)
+        qemu-system-aarch64 \
+            -M virt \
+            -cpu "$QEMU_CPU" \
+            $KVM_OPTS \
+            -m "$QEMU_RAM" \
+            -smp "$QEMU_CPUS" \
+            -bios "$UEFI_BIOS" \
+            -drive file="$WORK_IMAGE",format=raw,if=virtio \
+            -drive file="$SETUP_ISO_PATH",format=raw,if=virtio,readonly=on \
+            -device virtio-net-pci,netdev=net0 \
+            -netdev user,id=net0 \
+            -nographic || true
+    else
+        echo_error "Unknown boot mode: $BOOT_MODE"
+        exit 1
+    fi
+
+    # Verify setup completed successfully
+    echo_step "Verifying setup completion..."
+    LOOP_DEV=$(sudo losetup -fP --show "$WORK_IMAGE")
+
+    # Find rootfs partition
+    ROOT_PART=""
+    for part in ${LOOP_DEV}p*; do
+        if [ -b "$part" ]; then
+            FS_TYPE=$(sudo blkid -s TYPE -o value "$part" 2>/dev/null || true)
+            if [ "$FS_TYPE" = "ext4" ]; then
+                ROOT_PART="$part"
+                break
+            fi
+        fi
+    done
+
+    if [ -z "$ROOT_PART" ]; then
+        echo_error "Cannot find rootfs partition for verification!"
+        sudo losetup -d "$LOOP_DEV"
+        exit 1
+    fi
+
+    # Mount and check for completion flag
+    MOUNT_DIR=$(mktemp -d)
+    sudo mount "$ROOT_PART" "$MOUNT_DIR"
+    SETUP_COMPLETED=false
+
+    if sudo test -f "$MOUNT_DIR/root/setup-completed"; then
+        SETUP_COMPLETED=true
+        echo_success "Setup completed flag found"
+    fi
+
+    sudo umount "$MOUNT_DIR"
+    sudo losetup -d "$LOOP_DEV"
+    rm -rf "$MOUNT_DIR"
+
+    # Handle setup failure
+    if [ "$SETUP_COMPLETED" = false ]; then
+        echo_error "QEMU setup failed!"
+        echo_error "Setup completion flag not found at /root/setup-completed"
+        echo_error "The setup.sh script did not run to completion."
+        exit 1
+    fi
+
+    echo_step "Cleaning up temporary files..."
+    rm -f "$img_dir/setup.iso"
+    [ "$BOOT_MODE" = "cloudinit" ] && rm -f "$img_dir/cloudinit/seed.img"
+    echo_success "Cleanup completed"
+
+    echo ""
+    echo_success "QEMU finished - Setup completed successfully for '$CURRENT_IMAGE'"
+}
+
+# Build OCI image with podman (ublue/docker build_format)
+# Uses multi-stage build with one stage per service for granular caching
+run_docker_build() {
+    local img_name="$1"
+    local img_dir=$(get_image_dir "$img_name")
+
+    echo_step "Building OCI image with podman (multi-stage)..."
+
+    # Prepare setupfiles directory for build context
+    mkdir -p "$img_dir/setupfiles/packages"
+
+    # Copy devices.yml for repo introspection
+    cp "$WORKDIR_ROOT/devices.yml" "$img_dir/setupfiles/devices.yml"
+
+    # Copy all service packages.yml and setupfiles into build context
+    for service in $SERVICES; do
+        local service_path
+        service_path=$(resolve_service_path "$DEVICE_ID" "$service")
+        
+        if [[ -f "$service_path/packages.yml" ]]; then
+            cp "$service_path/packages.yml" "$img_dir/setupfiles/packages/${service}.yml"
+        fi
+        
+        # Copy service setupfiles (configs, systemd units, etc.)
+        if [[ -d "$service_path/setupfiles" ]]; then
+            mkdir -p "$img_dir/setupfiles/services/${service}"
+            cp -r "$service_path/setupfiles/." "$img_dir/setupfiles/services/${service}/"
+        fi
+
+        # Copy first-boot init scripts
+        if [[ -f "$service_path/first-boot/init.sh" ]]; then
+            mkdir -p "$img_dir/setupfiles/services/${service}/first-boot"
+            cp "$service_path/first-boot/init.sh" "$img_dir/setupfiles/services/${service}/first-boot/init.sh"
+        fi
+    done
+
+    # Generate multi-stage Containerfile
+    echo_step "Generating Containerfile from templates..."
+    "$WORKDIR_ROOT/build/generate-containerfile.sh" "$DEVICE_ID" "$DISTRO_ID" $SERVICES
+
+    # Copy generated Containerfile to build context
+    cp "$WORKDIR_ROOT/build/Containerfile" "$img_dir/Containerfile"
+
+    # Derive podman platform from DEVICE_ARCH
+    local podman_platform
+    case "$DEVICE_ARCH" in
+        arm64)  podman_platform="linux/arm64" ;;
+        amd64)  podman_platform="linux/amd64" ;;
+        *)      podman_platform="linux/$DEVICE_ARCH" ;;
+    esac
+    echo "  Platform: $podman_platform (from DEVICE_ARCH=$DEVICE_ARCH)"
+
+    podman build --platform "$podman_platform" \
+        -t "astralemu-${DEVICE_ID}-${DISTRO_ID}:latest" \
+        "$img_dir"
+
+    # Convert OCI → raw disk image using bootc-image-builder
+    echo_step "Converting OCI image to raw disk..."
+    local output_dir="$img_dir/bootc-output"
+    mkdir -p "$output_dir"
+
+    # Map DEVICE_ARCH to bootc target architecture
+    local target_arch
+    case "$DEVICE_ARCH" in
+        arm64)  target_arch="aarch64" ;;
+        amd64)  target_arch="x86_64" ;;
+        *)      target_arch="$DEVICE_ARCH" ;;
+    esac
+
+    sudo podman run --rm --privileged \
+        --security-opt label=type:unconfined_t \
+        -v "$output_dir":/output \
+        quay.io/centos-bootc/bootc-image-builder:latest \
+        --type raw \
+        --target-arch "$target_arch" \
+        "localhost/astralemu-${DEVICE_ID}-${DISTRO_ID}:latest"
+
+    # Move result to work image for stage 3
+    mv "$output_dir/image/disk.raw" "$WORK_IMAGE"
+    rm -rf "$output_dir"
+
+    echo_success "OCI image built and converted to raw"
+}
+
+# Run output format modules
+run_output_formats() {
+    echo_step "=== OUTPUT FORMATS ==="
+
+    # Read output formats from devices.yml
+    mapfile -t OUTPUT_FORMATS < <(get_device_field "$DEVICE_ID" ".output[]")
+
+    if [ ${#OUTPUT_FORMATS[@]} -eq 0 ]; then
+        echo_error "No output formats defined for device '$DEVICE_ID' in devices.yml"
+        exit 1
+    fi
+
+    echo "  Formats to produce: ${OUTPUT_FORMATS[*]}"
+
+    for format in "${OUTPUT_FORMATS[@]}"; do
+        local format_script="$WORKDIR_ROOT/output_formats/$format/build.sh"
+
+        if [ ! -f "$format_script" ]; then
+            echo_error "Output format module not found: $format_script"
+            exit 1
+        fi
+
+        echo_step "Running output format: $format"
+        source "$format_script"
+        "output_$format"
+    done
+
+    echo_success "All output formats completed"
+}
+
+# Build a single image (with stage support)
+build_image() {
+    local img_name="$1"
+
+    echo ""
+    cat << EOF
+╔═══════════════════════════════════════════════════════════╗
+║              Building image: $img_name (Stage: $STAGE)
+╚═══════════════════════════════════════════════════════════╝
+EOF
+    echo ""
+
+    load_image_config "$img_name"
+
+    # Display build fingerprint
+    BUILD_FINGERPRINT=$(compute_build_fingerprint "$img_name")
+    echo "  Build fingerprint: $BUILD_FINGERPRINT"
+
+    if [ "$UPGRADE_ONLY" = true ]; then
+        # Upgrade-only path: chroot pkg_upgrade on cached work-image
+        echo_step "=== UPGRADE ONLY ==="
+        run_upgrade_only "$img_name"
+    elif [ "$BUILD_FORMAT" = "docker" ]; then
+        # Ublue/OCI build path — no QEMU, no cloud-init
+        if [ "$STAGE" = "all" ] || [ "$STAGE" = "1" ] || [ "$STAGE" = "2" ]; then
+            echo_step "=== OCI BUILD (ublue) ==="
+            run_docker_build "$img_name"
+        fi
+    else
+        # Cloud-init or tarball path — download + QEMU
+        # Stage 1: Download + Create setup.iso
+        if [ "$STAGE" = "all" ] || [ "$STAGE" = "1" ]; then
+            echo_step "=== STAGE 1: Download and Prepare ==="
+            if [ "$SKIP_DOWNLOAD" = false ]; then
+                download_images "$img_name"
+            else
+                echo_warn "Skipping base images download"
+            fi
+            create_setup_iso "$img_name"
+        fi
+
+        # Stage 2: QEMU Setup
+        if [ "$STAGE" = "all" ] || [ "$STAGE" = "2" ]; then
+            echo_step "=== STAGE 2: QEMU Setup ==="
+            if [ "$SKIP_QEMU" = false ]; then
+                run_qemu_setup "$img_name"
+            else
+                echo_warn "Skipping QEMU - using existing work image"
+            fi
+        fi
+    fi
+
+    # Stage 3: Output format modules
+    if [ "$STAGE" = "all" ] || [ "$STAGE" = "3" ] || [ "$STAGE" = "output" ]; then
+        run_output_formats
+    fi
+
+    # Summary
+    echo ""
+    cat << EOF
+╔═══════════════════════════════════════════════════════════╗
+║           BUILD COMPLETED: $img_name ✓
+╚═══════════════════════════════════════════════════════════╝
+EOF
+    echo ""
+
+    # Cleanup temporary directory if it exists
+    if [ -n "$TEMP_IMAGE_DIR" ] && [ -d "$TEMP_IMAGE_DIR" ]; then
+        echo_step "Cleaning up temporary directory..."
+        rm -rf "$TEMP_IMAGE_DIR"
+        TEMP_IMAGE_DIR=""
+        echo_success "Temporary directory removed"
+    fi
+}
+
+# Build all images from .github/images.txt
+build_all_images() {
+    echo ""
+    cat << "EOF"
+╔═══════════════════════════════════════════════════════════╗
+║         Building ALL images from images.txt               ║
+╚═══════════════════════════════════════════════════════════╝
+EOF
+
+    local IMAGES_FILE="$WORKDIR_ROOT/.github/images.txt"
+    if [ ! -f "$IMAGES_FILE" ]; then
+        echo_error "images.txt not found at $IMAGES_FILE"
+        exit 1
+    fi
+
+    local images=()
+    while IFS= read -r line; do
+        # Skip comments and empty lines
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// }" ]] && continue
+        images+=("$(echo "$line" | xargs)")
+    done < "$IMAGES_FILE"
+
+    if [ ${#images[@]} -eq 0 ]; then
+        echo_error "No images found in $IMAGES_FILE"
+        exit 1
+    fi
+
+    echo_info "Images to build: ${images[*]}"
+    echo ""
+
+    local total=${#images[@]}
+    local current=0
+
+    for img in "${images[@]}"; do
+        current=$((current + 1))
+        echo ""
+        echo_info "[$current/$total] Building image '$img'..."
+        build_image "$img"
+        echo ""
+    done
+
+    echo ""
+    cat << "EOF"
+╔═══════════════════════════════════════════════════════════╗
+║      ALL BUILDS COMPLETED SUCCESSFULLY ✓                  ║
+╚═══════════════════════════════════════════════════════════╝
+EOF
+    echo ""
+}
+
+# Options menu
+show_usage() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+AstralEmu - Unified multi-device image builder
+
+Options:
+    --image NAME        Build a specific image
+    --all-images        Build all images from .github/images.txt
+    --list-images       List available devices and services
+    --stage STAGE       Run specific stage (1, 2, 3/output, or all; default: all)
+
+    --skip-download     Don't download base images
+    --skip-qemu         Don't launch QEMU (use existing work image)
+    --upgrade-only      Skip full build, just upgrade packages in cached work-image
+
+    --help              Display this help
+
+Image Name Format:
+    <device>/<distro>/<services>   Full format (e.g. rpi4/debian/default+emulations)
+    <device>/<services>            Use first distro (e.g. rpi4/default+emulations)
+    <device>                       Base only (e.g. rpi4)
+
+Build Stages:
+    Stage 1: Download base images + Create setup.iso
+    Stage 2: Run QEMU setup (installs packages, configures system)
+    Stage 3: Run output format modules (rpi, hekate, etc.)
+
+Examples:
+    $0 --list-images
+    $0 --image rpi4/default+emulations
+    $0 --image rpi5/debian/default+emulations
+    $0 --image switch/default+emulations+desktop
+    $0 --image rpi4/default+emulations --stage 1
+    $0 --all-images
+
+Architecture:
+    devices.yml              Device definitions (QEMU, power, repos, output formats)
+    devices/<device>/        Device-specific config and base service
+    services/         Shared services (ES-DE, emulations, desktop, etc.)
+    output_formats/<fmt>/    Output modules (each produces a complete deliverable)
+
+EOF
+    exit 0
+}
+
+# Parse arguments
+SKIP_DOWNLOAD=false
+SKIP_QEMU=false
+UPGRADE_ONLY=false
+IMAGE_NAME=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --image)
+            IMAGE_NAME="$2"
+            shift 2
+            ;;
+        --all-images)
+            BUILD_ALL_IMAGES=true
+            shift
+            ;;
+        --list-images)
+            list_images
+            exit 0
+            ;;
+        --stage)
+            STAGE="$2"
+            if [[ ! "$STAGE" =~ ^(1|2|3|output|all)$ ]]; then
+                echo_error "Invalid stage: $STAGE (must be 1, 2, 3/output, or all)"
+                exit 1
+            fi
+            shift 2
+            ;;
+        --skip-download)
+            SKIP_DOWNLOAD=true
+            shift
+            ;;
+        --skip-qemu)
+            SKIP_QEMU=true
+            shift
+            ;;
+        --upgrade-only)
+            UPGRADE_ONLY=true
+            shift
+            ;;
+        --help|-h)
+            show_usage
+            ;;
+        *)
+            echo_error "Unknown option: $1"
+            show_usage
+            ;;
+    esac
+done
+
+# Validate arguments
+if [ "$BUILD_ALL_IMAGES" = true ] && [ -n "$IMAGE_NAME" ]; then
+    echo_error "You cannot use --image and --all-images at the same time"
+    exit 1
+fi
+
+if [ "$BUILD_ALL_IMAGES" = false ] && [ -z "$IMAGE_NAME" ]; then
+    echo_error "You must specify --image or --all-images"
+    echo ""
+    show_usage
+fi
+
+# Banner
+cat << "EOF"
+╔═══════════════════════════════════════════════════════════╗
+║         AstralEmu - Multi-Device Image Builder           ║
+╚═══════════════════════════════════════════════════════════╝
+EOF
+
+echo ""
+
+# Execute workflow
+check_dependencies "$STAGE"
+
+if [ "$BUILD_ALL_IMAGES" = true ]; then
+    build_all_images
+else
+    build_image "$IMAGE_NAME"
+fi
+
+echo_success "Build pipeline finished."
+echo ""

@@ -1,0 +1,24 @@
+# Hekate main configuration
+# Copy to SD:/bootloader/hekate_ipl.ini if you want Switch Linux as default
+
+[config]
+autoboot=0
+autoboot_list=0
+bootwait=3
+backlight=100
+autohosoff=0
+autonogc=1
+
+# Main boot entries
+# Note: Individual distribution configs go in bootloader/ini/*.ini
+
+[Stock]
+fss0=atmosphere/package3
+emummcforce=1
+icon=bootloader/res/icon_payload.bmp
+
+# Example: Direct boot entry (alternative to ini file)
+#[Switch Linux Direct]
+#l4t=1
+#boot_prefixes=/switchroot/switch-linux/
+#id=SWLINUX

@@ -1,0 +1,65 @@
+packages:
+  apt:
+    - xserver-xorg-core
+    - xserver-xorg-input-libinput
+    - xinit
+    - x11-xserver-utils
+    - xfce4
+    - xfce4-goodies
+    - thunar-archive-plugin
+    - lightdm
+    - lightdm-gtk-greeter
+    - file-roller
+    - parole
+    - gnome-software
+    - gnome-software-plugin-flatpak
+  ubuntu:
+    - firefox
+  debian:
+    - firefox-esr
+  fedora:
+    - xorg-x11-server-Xorg
+    - xorg-x11-drv-libinput
+    - xorg-x11-xinit
+    - xorg-x11-server-utils
+    - xfce4-session
+    - xfce4-panel
+    - xfce4-settings
+    - xfwm4
+    - xfdesktop
+    - xfce4-appfinder
+    - xfce4-power-manager
+    - xfce4-terminal
+    - thunar
+    - xfce4-whiskermenu-plugin
+    - xfce4-clipman-plugin
+    - xfce4-screenshooter-plugin
+    - xfce4-taskmanager
+    - xfce4-notifyd
+    - thunar-archive-plugin
+    - lightdm
+    - lightdm-gtk-greeter
+    - firefox
+    - file-roller
+    - parole
+    - gnome-software
+    - gnome-software-plugin-flatpak
+  arch:
+    - xorg-server
+    - xf86-input-libinput
+    - xorg-xinit
+    - xorg-xrandr
+    - xorg-xset
+    - xorg-xdpyinfo
+    - xorg-xrdb
+    - xorg-xhost
+    - xfce4
+    - xfce4-goodies
+    - thunar-archive-plugin
+    - lightdm
+    - lightdm-gtk-greeter
+    - firefox
+    - file-roller
+    - parole
+    - gnome-software
+    - gnome-software-plugin-flatpak

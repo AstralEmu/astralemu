@@ -1,0 +1,21 @@
+[Unit]
+Description=/var Dynamic Expansion Service
+Documentation=file:///usr/share/doc/astralemu/varfs.md
+After=local-fs.target
+Requires=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/varfs-expand-daemon.sh
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+ProtectSystem=false
+ProtectHome=false
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target
