@@ -65,6 +65,7 @@ service_depends_on() {
     service_path=$(resolve_service_path "$device_id" "$service_name")
     
     if [[ -n "$service_path" && -f "$service_path/depends.sh" ]]; then
+        local DEPENDS_ON=""
         source "$service_path/depends.sh"
         echo "$DEPENDS_ON"
     fi

@@ -16,3 +16,8 @@ rpi5/debian/emulations+android+desktop+kodi
 
 # Nintendo Switch
 switch/ubuntu/emulations+android+tabs+kodi
+
+# Universal Blue (OCI/bootc builds)
+rpi4/ublue/emulations+desktop
+rpi5/ublue/emulations+android+desktop
+switch/ublue/emulations+android+tabs

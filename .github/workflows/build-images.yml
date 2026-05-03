@@ -33,7 +33,7 @@ jobs:
       - name: Generate build matrix from images.txt + devices.yml
         id: matrix
         run: |
-          # Build a JSON matrix with image name + runner for each entry
+          # Build a JSON matrix with image name, runner, and build_format for each entry
           MATRIX_ENTRIES="[]"
 
           while IFS= read -r line; do
@@ -42,19 +42,40 @@ jobs:
             [[ -z "${line// }" ]] && continue
             line=$(echo "$line" | xargs)
 
-            # Extract device ID (first part before /)
+            # Extract device ID and distro ID
             DEVICE_ID=$(echo "$line" | cut -d'/' -f1)
+            SLASH_COUNT=$(echo "$line" | tr -cd '/' | wc -c)
 
-            # Look up runner in devices.yml
+            # Determine distro ID from image name
+            if [ "$SLASH_COUNT" -eq 2 ]; then
+              DISTRO_ID=$(echo "$line" | cut -d'/' -f2)
+            elif [ "$SLASH_COUNT" -eq 1 ]; then
+              # Check if second part is a distro or services
+              SECOND=$(echo "$line" | cut -d'/' -f2)
+              IS_DISTRO=$(yq ".devices[] | select(.id == \"$DEVICE_ID\") | .distros[] | select(.id == \"$SECOND\") | .id" devices.yml 2>/dev/null || true)
+              if [ -n "$IS_DISTRO" ] && [ "$IS_DISTRO" != "null" ]; then
+                DISTRO_ID="$SECOND"
+              else
+                DISTRO_ID=$(yq ".devices[] | select(.id == \"$DEVICE_ID\") | .distros[0].id" devices.yml)
+              fi
+            else
+              DISTRO_ID=$(yq ".devices[] | select(.id == \"$DEVICE_ID\") | .distros[0].id" devices.yml)
+            fi
+
+            # Look up runner and build_format
             RUNNER=$(yq ".devices[] | select(.id == \"$DEVICE_ID\") | .runner" devices.yml)
+            BUILD_FORMAT=$(yq ".devices[] | select(.id == \"$DEVICE_ID\") | .distros[] | select(.id == \"$DISTRO_ID\") | .build_format" devices.yml)
 
             if [ -z "$RUNNER" ] || [ "$RUNNER" = "null" ]; then
               echo "WARNING: No runner found for device '$DEVICE_ID', skipping '$line'"
               continue
             fi
 
+            # Default build_format to cloud-init if not specified
+            BUILD_FORMAT=${BUILD_FORMAT:-cloud-init}
+
             # Add to matrix
-            MATRIX_ENTRIES=$(echo "$MATRIX_ENTRIES" | jq --arg img "$line" --arg runner "$RUNNER" '. + [{"image": $img, "runner": $runner}]')
+            MATRIX_ENTRIES=$(echo "$MATRIX_ENTRIES" | jq --arg img "$line" --arg runner "$RUNNER" --arg fmt "$BUILD_FORMAT" '. + [{"image": $img, "runner": $runner, "build_format": $fmt}]')
           done < .github/images.txt
 
           MATRIX=$(echo "{\"include\": $MATRIX_ENTRIES}" | jq -c .)
@@ -62,8 +83,10 @@ jobs:
           echo "Build matrix:"
           echo "$MATRIX" | jq .
 
-  # Job 2: Stage 1+2 - Download and QEMU Setup (parallel for all images)
-  stage1-2-download-qemu:
+  # Job 2: Stage 1+2 - Download and Setup (parallel for all images)
+  # For cloud-init/tarball: QEMU setup
+  # For docker (ublue): podman build + bootc-image-builder
+  stage1-2-build:
     needs: detect-images
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -81,6 +104,7 @@ jobs:
           SANITIZED=$(echo "${{ matrix.image }}" | tr '/+' '--')
           echo "name=${SANITIZED}" >> $GITHUB_OUTPUT
           echo "Artifact name: ${SANITIZED}"
+          echo "build_format=${{ matrix.build_format }}" >> $GITHUB_OUTPUT
 
       - name: Free disk space
         run: |
@@ -92,7 +116,8 @@ jobs:
           sudo docker image prune --all --force 2>/dev/null || true
           df -h
 
-      - name: Install dependencies
+      - name: Install dependencies (QEMU builds)
+        if: matrix.build_format != 'docker'
         run: |
           sudo apt update
           sudo apt install -y \
@@ -106,7 +131,7 @@ jobs:
           sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}"
           sudo chmod +x /usr/local/bin/yq
 
-          # Install QEMU system emulation only if not running on native arch
+          # Install QEMU system emulation
           DEVICE_ARCH=$(yq ".devices[] | select(.id == \"$(echo '${{ matrix.image }}' | cut -d'/' -f1)\") | .arch" devices.yml)
           HOST_ARCH=$(dpkg --print-architecture)
           if [ "$HOST_ARCH" = "$DEVICE_ARCH" ] || { [ "$HOST_ARCH" = "arm64" ] && [ "$DEVICE_ARCH" = "arm64" ]; }; then
@@ -117,12 +142,38 @@ jobs:
             sudo apt install -y qemu-system-aarch64 qemu-efi-aarch64
           fi
 
+      - name: Install dependencies (OCI/bootc builds)
+        if: matrix.build_format == 'docker'
+        run: |
+          sudo apt update
+          sudo apt install -y wget xz-utils
+
+          # Install yq
+          ARCH=$(dpkg --print-architecture)
+          sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}"
+          sudo chmod +x /usr/local/bin/yq
+
+          # Install podman
+          echo "Installing podman for OCI build..."
+          sudo apt install -y podman || {
+            # Fallback: install from official repo if distro package is too old
+            sudo mkdir -p /etc/apt/keyrings
+            curl -fsSL https://download.opensuse.org/repositories/devel:kubic:libcontainers:unstable/xUbuntu_$(lsb_release -rs)/Release.key | gpg --dearmor -o /etc/apt/keyrings/podman-archive-keyring.gpg
+            echo "deb [signed-by=/etc/apt/keyrings/podman-archive-keyring.gpg] https://download.opensuse.org/repositories/devel:kubic:libcontainers:unstable/xUbuntu_$(lsb_release -rs)/ /" | sudo tee /etc/apt/sources.list.d/podman.list
+            sudo apt update
+            sudo apt install -y podman
+          }
+
+          # Pre-pull bootc-image-builder container (saves time during build)
+          sudo podman pull quay.io/centos-bootc/bootc-image-builder:latest || true
+
       - name: Fetch astralemu-packages device definitions
         run: |
           wget -q "https://raw.githubusercontent.com/AstralEmu/astralemu-packages/refs/heads/main/devices.yml" -O .packages-devices.yml
           echo "Remote devices.yml fetched (power scores for cache invalidation)"
 
-      - name: Cache base images
+      - name: Cache base images (QEMU builds)
+        if: matrix.build_format != 'docker'
         uses: actions/cache@v4
         with:
           path: |
@@ -134,29 +185,36 @@ jobs:
           restore-keys: |
             base-images-
 
-      - name: Restore cached work-image
+      - name: Restore cached work-image (QEMU builds)
         id: cache-work
-        if: inputs.force_rebuild != true
+        if: matrix.build_format != 'docker' && inputs.force_rebuild != true
         uses: actions/cache/restore@v4
         with:
           path: work-image.raw
           key: work-image-${{ steps.artifact.outputs.name }}-${{ hashFiles('devices.yml', 'bin/autobuild', '.packages-devices.yml', 'devices/**/setup.sh', 'devices/**/packages.yml', 'devices/**/config.sh', 'services/**/setup.sh', 'services/**/packages.yml') }}
 
-      - name: Full build - Stage 1+2 (cache miss or force rebuild)
-        if: steps.cache-work.outputs.cache-hit != 'true' || inputs.force_rebuild == true
+      - name: Full build - Stage 1+2 QEMU (cache miss or force rebuild)
+        if: matrix.build_format != 'docker' && (steps.cache-work.outputs.cache-hit != 'true' || inputs.force_rebuild == true)
         run: |
           ./bin/autobuild --image "${{ matrix.image }}" --stage 1
           ./bin/autobuild --image "${{ matrix.image }}" --stage 2
         timeout-minutes: 90
 
-      - name: Upgrade only (cache hit)
-        if: steps.cache-work.outputs.cache-hit == 'true' && inputs.force_rebuild != true
+      - name: Upgrade only (cache hit, QEMU builds)
+        if: matrix.build_format != 'docker' && steps.cache-work.outputs.cache-hit == 'true' && inputs.force_rebuild != true
         run: |
           echo "Cache hit - skipping full build, upgrading packages only"
           ./bin/autobuild --image "${{ matrix.image }}" --upgrade-only --stage 2
 
-      - name: Save work-image to cache
-        if: (steps.cache-work.outputs.cache-hit != 'true' || inputs.force_rebuild == true) && !cancelled()
+      - name: Full build - OCI (docker/bootc format)
+        if: matrix.build_format == 'docker'
+        run: |
+          ./bin/autobuild --image "${{ matrix.image }}" --stage 1
+          ./bin/autobuild --image "${{ matrix.image }}" --stage 2
+        timeout-minutes: 120
+
+      - name: Save work-image to cache (QEMU builds)
+        if: matrix.build_format != 'docker' && (steps.cache-work.outputs.cache-hit != 'true' || inputs.force_rebuild == true) && !cancelled()
         uses: actions/cache/save@v4
         with:
           path: work-image.raw
@@ -169,8 +227,8 @@ jobs:
           echo "Files before cleanup:"
           ls -lh *.img *.raw 2>/dev/null || true
 
-          # Remove setup.iso if it exists (not needed after stage 2)
-          rm -f setup.iso
+          # Remove setup.iso and seed.img if they exist (not needed after build)
+          rm -f setup.iso seed.img
 
           # Remove downloaded base image (already copied to work-image.raw)
           find . -maxdepth 1 -name "*.qcow2" -delete
@@ -208,13 +266,13 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
             echo "type=cron" >> $GITHUB_OUTPUT
-            echo "🕐 Cron build detected - will create/update daily release"
+            echo " Cron build detected - will create/update daily release"
           elif [ "${{ github.event_name }}" = "push" ]; then
             echo "type=push" >> $GITHUB_OUTPUT
-            echo "📝 Push build detected - will create new release with changelog"
+            echo " Push build detected - will create new release with changelog"
           else
             echo "type=manual" >> $GITHUB_OUTPUT
-            echo "🔧 Manual build detected - will create new release"
+            echo " Manual build detected - will create new release"
           fi
 
       - name: Generate release name and tag
@@ -251,7 +309,6 @@ jobs:
 
       - name: Generate changelog
         run: |
-          # Commits since last release (exclude daily builds)
           LAST_TAG=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("daily-") | not)][0].tagName' 2>/dev/null || echo "")
 
           if [ -z "$LAST_TAG" ]; then
@@ -299,8 +356,8 @@ jobs:
 
           cat >> release_body.md << 'FOOTER'
           <p align="center">
-            <a href="https://github.com/AstralEmu/astralemu">Main Repo</a> •
-            <a href="https://astralemu.github.io">Documentation</a> •
+            <a href="https://github.com/AstralEmu/astralemu">Main Repo</a> &
+            <a href="https://astralemu.github.io">Documentation</a> &
             <a href="https://github.com/orgs/AstralEmu/discussions">Community</a>
           </p>
           FOOTER
@@ -329,13 +386,13 @@ jobs:
             --notes-file release_body.md \
             $PRERELEASE_FLAG
 
-          echo "✅ Release ${{ steps.release_info.outputs.tag }} created successfully"
+          echo "Release ${{ steps.release_info.outputs.tag }} created successfully"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Job 4: Stage 3 - Run output format modules + upload (parallel for all images)
   stage3-output:
-    needs: [detect-images, stage1-2-download-qemu, create-release]
+    needs: [detect-images, stage1-2-build, create-release]
     if: ${{ !cancelled() }}
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -351,7 +408,6 @@ jobs:
       - name: Generate sanitized artifact name
         id: artifact
         run: |
-          # Replace / and + with - for artifact names
           SANITIZED=$(echo "${{ matrix.image }}" | tr '/+' '--')
           echo "name=${SANITIZED}" >> $GITHUB_OUTPUT
 
@@ -367,16 +423,13 @@ jobs:
             squashfs-tools \
             xz-utils
 
-          # Install yq
           ARCH=$(dpkg --print-architecture)
           sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}"
           sudo chmod +x /usr/local/bin/yq
 
       - name: Enable loop devices
         run: |
-          # Load loop module
           sudo modprobe loop
-          # Check available loop devices
           ls -la /dev/loop* || true
 
       - name: Download images from stage 1+2
@@ -391,12 +444,11 @@ jobs:
       - name: Upload to release
         if: ${{ !cancelled() }}
         run: |
-          # Upload all output artifacts (*.img.xz for rpi, *.tar.gz or *.7z for hekate, etc.)
           UPLOADED=0
           for f in *.img.xz *.tar.gz *.7z; do
             if [ -f "$f" ]; then
               gh release upload ${{ needs.create-release.outputs.tag }} "$f" --clobber
-              echo "✅ Uploaded $f to release"
+              echo "Uploaded $f to release"
               UPLOADED=$((UPLOADED + 1))
             fi
           done
@@ -411,7 +463,6 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          # Clean up large files
           sudo rm -f *.img *.img.xz *.raw *.squashfs *.tar.gz *.7z
           df -h
 
@@ -432,18 +483,17 @@ jobs:
 
           echo "Checking release $RELEASE_TAG for assets..."
 
-          # Get asset count from release
           ASSET_COUNT=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length' 2>/dev/null || echo "0")
 
           echo "Release has $ASSET_COUNT asset(s)"
 
           if [ "$ASSET_COUNT" -eq 0 ]; then
-            echo "⚠️ Release $RELEASE_TAG is empty (no assets uploaded)"
+            echo "Release $RELEASE_TAG is empty (no assets uploaded)"
             echo "Deleting empty release..."
             gh release delete "$RELEASE_TAG" --yes
-            echo "✅ Empty release deleted successfully"
+            echo "Empty release deleted successfully"
           else
-            echo "✅ Release $RELEASE_TAG has $ASSET_COUNT asset(s), keeping it"
+            echo "Release $RELEASE_TAG has $ASSET_COUNT asset(s), keeping it"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,14 @@
+[Unit]
+Description=Waydroid First Boot Setup (GApps)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!REPLACE_DEVICE_HOME/.waydroid-initialized
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/waydroid-first-boot.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

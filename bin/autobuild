@@ -1354,7 +1354,7 @@ run_docker_build() {
     # Copy devices.yml for repo introspection
     cp "$WORKDIR_ROOT/devices.yml" "$img_dir/setupfiles/devices.yml"
 
-    # Copy all service packages.yml files
+    # Copy all service packages.yml and setupfiles into build context
     for service in $SERVICES; do
         local service_path
         service_path=$(resolve_service_path "$DEVICE_ID" "$service")
@@ -1363,16 +1363,16 @@ run_docker_build() {
             cp "$service_path/packages.yml" "$img_dir/setupfiles/packages/${service}.yml"
         fi
         
-        # Copy service files (configs, systemd units, etc.)
-        if [[ -d "$service_path/files" ]]; then
+        # Copy service setupfiles (configs, systemd units, etc.)
+        if [[ -d "$service_path/setupfiles" ]]; then
             mkdir -p "$img_dir/setupfiles/services/${service}"
-            cp -r "$service_path/files/." "$img_dir/setupfiles/services/${service}/"
+            cp -r "$service_path/setupfiles/." "$img_dir/setupfiles/services/${service}/"
         fi
-        
-        # Copy install.sh if exists (build-time script)
-        if [[ -f "$service_path/install.sh" ]]; then
-            mkdir -p "$img_dir/setupfiles/services/${service}"
-            cp "$service_path/install.sh" "$img_dir/setupfiles/services/${service}/install.sh"
+
+        # Copy first-boot init scripts
+        if [[ -f "$service_path/first-boot/init.sh" ]]; then
+            mkdir -p "$img_dir/setupfiles/services/${service}/first-boot"
+            cp "$service_path/first-boot/init.sh" "$img_dir/setupfiles/services/${service}/first-boot/init.sh"
         fi
     done
 
@@ -1383,28 +1383,38 @@ run_docker_build() {
     # Copy generated Containerfile to build context
     cp "$WORKDIR_ROOT/build/Containerfile" "$img_dir/Containerfile"
 
-    # Build OCI image with BuildKit caching
-    echo_step "Running podman build (multi-stage with cache)..."
-    echo "  Base: ${IMAGE_URL}"
-    echo "  Stages: base-common → services → final"
-    
-    podman build --platform linux/arm64 \
+    # Derive podman platform from DEVICE_ARCH
+    local podman_platform
+    case "$DEVICE_ARCH" in
+        arm64)  podman_platform="linux/arm64" ;;
+        amd64)  podman_platform="linux/amd64" ;;
+        *)      podman_platform="linux/$DEVICE_ARCH" ;;
+    esac
+    echo "  Platform: $podman_platform (from DEVICE_ARCH=$DEVICE_ARCH)"
+
+    podman build --platform "$podman_platform" \
         -t "astralemu-${DEVICE_ID}-${DISTRO_ID}:latest" \
-        --build-arg DEVICE_ID="$DEVICE_ID" \
-        --build-arg DISTRO_ID="$DISTRO_ID" \
         "$img_dir"
 
     # Convert OCI → raw disk image using bootc-image-builder
     echo_step "Converting OCI image to raw disk..."
     local output_dir="$img_dir/bootc-output"
     mkdir -p "$output_dir"
-    
+
+    # Map DEVICE_ARCH to bootc target architecture
+    local target_arch
+    case "$DEVICE_ARCH" in
+        arm64)  target_arch="aarch64" ;;
+        amd64)  target_arch="x86_64" ;;
+        *)      target_arch="$DEVICE_ARCH" ;;
+    esac
+
     sudo podman run --rm --privileged \
         --security-opt label=type:unconfined_t \
         -v "$output_dir":/output \
         quay.io/centos-bootc/bootc-image-builder:latest \
         --type raw \
-        --target-arch aarch64 \
+        --target-arch "$target_arch" \
         "localhost/astralemu-${DEVICE_ID}-${DISTRO_ID}:latest"
 
     # Move result to work image for stage 3

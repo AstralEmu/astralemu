@@ -39,3 +39,6 @@ release_body.md
 !devices/*/cloudinit/meta-data
 # But ignore seed.img (automatically generated)
 devices/*/cloudinit/seed.img
+
+# Generated Containerfile
+build/Containerfile

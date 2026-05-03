@@ -346,6 +346,15 @@ fi
 # EMULATIONSTATION SYSTEMS CONFIG
 # =============================================================================
 
+# Resolve libretro core directory based on distro/package manager
+case "$PKG_MANAGER" in
+    apt)        LIBRETRO_DIR="/usr/lib/libretro" ;;
+    dnf|rpm-ostree) LIBRETRO_DIR="/usr/lib64/libretro" ;;
+    pacman)     LIBRETRO_DIR="/usr/lib/libretro" ;;
+    *)          LIBRETRO_DIR="/usr/lib/libretro" ;;
+esac
+echo "  Libretro core directory: $LIBRETRO_DIR"
+
 echo "Configuring EmulationStation systems..."
 
 mkdir -p $DEVICE_HOME/.emulationstation
@@ -363,7 +372,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Nintendo Entertainment System</fullname>
         <path>$DATA_ROOT/roms/nes</path>
         <extension>.nes .NES .zip .ZIP .7z</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/fceumm_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/fceumm_libretro.so %ROM%</command>
         <platform>nes</platform>
         <theme>nes</theme>
     </system>
@@ -373,7 +382,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Super Nintendo</fullname>
         <path>$DATA_ROOT/roms/snes</path>
         <extension>.sfc .smc .SFC .SMC .zip .ZIP .7z</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/snes9x_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/snes9x_libretro.so %ROM%</command>
         <platform>snes</platform>
         <theme>snes</theme>
     </system>
@@ -383,7 +392,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Nintendo 64</fullname>
         <path>$DATA_ROOT/roms/n64</path>
         <extension>.n64 .N64 .z64 .Z64 .v64 .V64 .zip .ZIP</extension>
-        <command>setperf -p balanced --oc off -n 2 retroarch -L /usr/lib/libretro/mupen64plus_next_libretro.so %ROM%</command>
+        <command>setperf -p balanced --oc off -n 2 retroarch -L $LIBRETRO_DIR/mupen64plus_next_libretro.so %ROM%</command>
         <platform>n64</platform>
         <theme>n64</theme>
     </system>
@@ -393,7 +402,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Game Boy</fullname>
         <path>$DATA_ROOT/roms/gb</path>
         <extension>.gb .GB .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/gambatte_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/gambatte_libretro.so %ROM%</command>
         <platform>gb</platform>
         <theme>gb</theme>
     </system>
@@ -403,7 +412,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Game Boy Color</fullname>
         <path>$DATA_ROOT/roms/gbc</path>
         <extension>.gbc .GBC .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/gambatte_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/gambatte_libretro.so %ROM%</command>
         <platform>gbc</platform>
         <theme>gbc</theme>
     </system>
@@ -413,7 +422,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Game Boy Advance</fullname>
         <path>$DATA_ROOT/roms/gba</path>
         <extension>.gba .GBA .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/mgba_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/mgba_libretro.so %ROM%</command>
         <platform>gba</platform>
         <theme>gba</theme>
     </system>
@@ -496,7 +505,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Sega Genesis</fullname>
         <path>$DATA_ROOT/roms/genesis</path>
         <extension>.md .MD .gen .GEN .bin .BIN .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/genesis_plus_gx_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/genesis_plus_gx_libretro.so %ROM%</command>
         <platform>genesis</platform>
         <theme>genesis</theme>
     </system>
@@ -506,7 +515,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Sega Saturn</fullname>
         <path>$DATA_ROOT/roms/saturn</path>
         <extension>.cue .CUE .iso .ISO .chd .CHD</extension>
-        <command>setperf -p performance --oc oc -n 4 retroarch -L /usr/lib/libretro/beetle_saturn_libretro.so %ROM%</command>
+        <command>setperf -p performance --oc oc -n 4 retroarch -L $LIBRETRO_DIR/beetle_saturn_libretro.so %ROM%</command>
         <platform>saturn</platform>
         <theme>saturn</theme>
     </system>
@@ -516,7 +525,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Sega Dreamcast</fullname>
         <path>$DATA_ROOT/roms/dreamcast</path>
         <extension>.cdi .CDI .gdi .GDI .chd .CHD</extension>
-        <command>setperf -p performance --oc oc -n 4 retroarch -L /usr/lib/libretro/flycast_libretro.so %ROM%</command>
+        <command>setperf -p performance --oc oc -n 4 retroarch -L $LIBRETRO_DIR/flycast_libretro.so %ROM%</command>
         <platform>dreamcast</platform>
         <theme>dreamcast</theme>
     </system>
@@ -526,7 +535,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Sega Master System</fullname>
         <path>$DATA_ROOT/roms/mastersystem</path>
         <extension>.sms .SMS .zip .ZIP .7z</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/genesis_plus_gx_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/genesis_plus_gx_libretro.so %ROM%</command>
         <platform>mastersystem</platform>
         <theme>mastersystem</theme>
     </system>
@@ -536,7 +545,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Sega Game Gear</fullname>
         <path>$DATA_ROOT/roms/gamegear</path>
         <extension>.gg .GG .zip .ZIP .7z</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/genesis_plus_gx_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/genesis_plus_gx_libretro.so %ROM%</command>
         <platform>gamegear</platform>
         <theme>gamegear</theme>
     </system>
@@ -546,7 +555,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Sega CD</fullname>
         <path>$DATA_ROOT/roms/segacd</path>
         <extension>.cue .CUE .iso .ISO .chd .CHD</extension>
-        <command>setperf -p balanced --oc off -n 2 retroarch -L /usr/lib/libretro/picodrive_libretro.so %ROM%</command>
+        <command>setperf -p balanced --oc off -n 2 retroarch -L $LIBRETRO_DIR/picodrive_libretro.so %ROM%</command>
         <platform>segacd</platform>
         <theme>segacd</theme>
     </system>
@@ -556,7 +565,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Sega 32X</fullname>
         <path>$DATA_ROOT/roms/sega32x</path>
         <extension>.32x .32X .zip .ZIP .7z</extension>
-        <command>setperf -p balanced --oc off -n 2 retroarch -L /usr/lib/libretro/picodrive_libretro.so %ROM%</command>
+        <command>setperf -p balanced --oc off -n 2 retroarch -L $LIBRETRO_DIR/picodrive_libretro.so %ROM%</command>
         <platform>sega32x</platform>
         <theme>sega32x</theme>
     </system>
@@ -566,7 +575,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Neo Geo</fullname>
         <path>$DATA_ROOT/roms/neogeo</path>
         <extension>.zip .ZIP .7z</extension>
-        <command>setperf -p balanced --oc off -n 2 retroarch -L /usr/lib/libretro/fbneo_libretro.so %ROM%</command>
+        <command>setperf -p balanced --oc off -n 2 retroarch -L $LIBRETRO_DIR/fbneo_libretro.so %ROM%</command>
         <platform>neogeo</platform>
         <theme>neogeo</theme>
     </system>
@@ -576,7 +585,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Neo Geo CD</fullname>
         <path>$DATA_ROOT/roms/neogeocd</path>
         <extension>.cue .CUE .iso .ISO .chd .CHD</extension>
-        <command>setperf -p balanced --oc off -n 2 retroarch -L /usr/lib/libretro/neocd_libretro.so %ROM%</command>
+        <command>setperf -p balanced --oc off -n 2 retroarch -L $LIBRETRO_DIR/neocd_libretro.so %ROM%</command>
         <platform>neogeocd</platform>
         <theme>neogeocd</theme>
     </system>
@@ -587,7 +596,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>PC Engine / TurboGrafx-16</fullname>
         <path>$DATA_ROOT/roms/pcengine</path>
         <extension>.pce .PCE .cue .CUE .zip .ZIP .7z</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/beetle_pce_fast_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/beetle_pce_fast_libretro.so %ROM%</command>
         <platform>pcengine</platform>
         <theme>pcengine</theme>
     </system>
@@ -597,7 +606,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>PC Engine SuperGrafx</fullname>
         <path>$DATA_ROOT/roms/supergrafx</path>
         <extension>.pce .PCE .sgx .SGX .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/beetle_supergrafx_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/beetle_supergrafx_libretro.so %ROM%</command>
         <platform>supergrafx</platform>
         <theme>supergrafx</theme>
     </system>
@@ -607,7 +616,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>NEC PC-8801</fullname>
         <path>$DATA_ROOT/roms/pc88</path>
         <extension>.d88 .D88 .u88 .U88 .m3u .M3U</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/quasi88_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/quasi88_libretro.so %ROM%</command>
         <platform>pc88</platform>
         <theme>pc88</theme>
     </system>
@@ -618,7 +627,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Neo Geo Pocket / Color</fullname>
         <path>$DATA_ROOT/roms/ngp</path>
         <extension>.ngp .NGP .ngc .NGC .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/mednafen_ngp_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/mednafen_ngp_libretro.so %ROM%</command>
         <platform>ngp</platform>
         <theme>ngp</theme>
     </system>
@@ -629,7 +638,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>WonderSwan / Color</fullname>
         <path>$DATA_ROOT/roms/wonderswan</path>
         <extension>.ws .WS .wsc .WSC .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/beetle_wswan_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/beetle_wswan_libretro.so %ROM%</command>
         <platform>wonderswan</platform>
         <theme>wonderswan</theme>
     </system>
@@ -640,7 +649,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Virtual Boy</fullname>
         <path>$DATA_ROOT/roms/virtualboy</path>
         <extension>.vb .VB .vboy .VBOY .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/beetle_vb_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/beetle_vb_libretro.so %ROM%</command>
         <platform>virtualboy</platform>
         <theme>virtualboy</theme>
     </system>
@@ -651,7 +660,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Atari 2600</fullname>
         <path>$DATA_ROOT/roms/atari2600</path>
         <extension>.a26 .A26 .bin .BIN .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/stella_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/stella_libretro.so %ROM%</command>
         <platform>atari2600</platform>
         <theme>atari2600</theme>
     </system>
@@ -661,7 +670,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Atari 7800</fullname>
         <path>$DATA_ROOT/roms/atari7800</path>
         <extension>.a78 .A78 .bin .BIN .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/prosystem_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/prosystem_libretro.so %ROM%</command>
         <platform>atari7800</platform>
         <theme>atari7800</theme>
     </system>
@@ -671,7 +680,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Atari Lynx</fullname>
         <path>$DATA_ROOT/roms/atarilynx</path>
         <extension>.lnx .LNX .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/handy_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/handy_libretro.so %ROM%</command>
         <platform>atarilynx</platform>
         <theme>atarilynx</theme>
     </system>
@@ -681,7 +690,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Atari 800 / 5200</fullname>
         <path>$DATA_ROOT/roms/atari800</path>
         <extension>.a52 .A52 .atr .ATR .xex .XEX .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/atari800_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/atari800_libretro.so %ROM%</command>
         <platform>atari800</platform>
         <theme>atari800</theme>
     </system>
@@ -691,7 +700,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Atari Jaguar</fullname>
         <path>$DATA_ROOT/roms/jaguar</path>
         <extension>.j64 .J64 .jag .JAG .zip .ZIP</extension>
-        <command>setperf -p performance --oc oc -n 4 retroarch -L /usr/lib/libretro/virtualjaguar_libretro.so %ROM%</command>
+        <command>setperf -p performance --oc oc -n 4 retroarch -L $LIBRETRO_DIR/virtualjaguar_libretro.so %ROM%</command>
         <platform>jaguar</platform>
         <theme>jaguar</theme>
     </system>
@@ -702,7 +711,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>3DO Interactive Multiplayer</fullname>
         <path>$DATA_ROOT/roms/3do</path>
         <extension>.iso .ISO .cue .CUE .chd .CHD</extension>
-        <command>setperf -p performance --oc oc -n 4 retroarch -L /usr/lib/libretro/opera_libretro.so %ROM%</command>
+        <command>setperf -p performance --oc oc -n 4 retroarch -L $LIBRETRO_DIR/opera_libretro.so %ROM%</command>
         <platform>3do</platform>
         <theme>3do</theme>
     </system>
@@ -713,7 +722,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Commodore 64</fullname>
         <path>$DATA_ROOT/roms/c64</path>
         <extension>.d64 .D64 .t64 .T64 .prg .PRG .crt .CRT .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/vice_x64_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/vice_x64_libretro.so %ROM%</command>
         <platform>c64</platform>
         <theme>c64</theme>
     </system>
@@ -723,7 +732,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Commodore Amiga</fullname>
         <path>$DATA_ROOT/roms/amiga</path>
         <extension>.adf .ADF .ipf .IPF .lha .LHA .hdf .HDF .zip .ZIP</extension>
-        <command>setperf -p balanced --oc off -n 2 retroarch -L /usr/lib/libretro/puae_libretro.so %ROM%</command>
+        <command>setperf -p balanced --oc off -n 2 retroarch -L $LIBRETRO_DIR/puae_libretro.so %ROM%</command>
         <platform>amiga</platform>
         <theme>amiga</theme>
     </system>
@@ -734,7 +743,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>ZX Spectrum</fullname>
         <path>$DATA_ROOT/roms/zxspectrum</path>
         <extension>.tzx .TZX .tap .TAP .z80 .Z80 .sna .SNA .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/fuse_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/fuse_libretro.so %ROM%</command>
         <platform>zxspectrum</platform>
         <theme>zxspectrum</theme>
     </system>
@@ -745,7 +754,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Amstrad CPC</fullname>
         <path>$DATA_ROOT/roms/amstradcpc</path>
         <extension>.dsk .DSK .cdt .CDT .cpr .CPR .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/cap32_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/cap32_libretro.so %ROM%</command>
         <platform>amstradcpc</platform>
         <theme>amstradcpc</theme>
     </system>
@@ -756,7 +765,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>MSX / MSX2</fullname>
         <path>$DATA_ROOT/roms/msx</path>
         <extension>.rom .ROM .mx1 .MX1 .mx2 .MX2 .dsk .DSK .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/bluemsx_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/bluemsx_libretro.so %ROM%</command>
         <platform>msx</platform>
         <theme>msx</theme>
     </system>
@@ -767,7 +776,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Sharp X68000</fullname>
         <path>$DATA_ROOT/roms/x68000</path>
         <extension>.dim .DIM .xdf .XDF .hdm .HDM .2hd .2HD .zip .ZIP</extension>
-        <command>setperf -p balanced --oc off -n 2 retroarch -L /usr/lib/libretro/px68k_libretro.so %ROM%</command>
+        <command>setperf -p balanced --oc off -n 2 retroarch -L $LIBRETRO_DIR/px68k_libretro.so %ROM%</command>
         <platform>x68000</platform>
         <theme>x68000</theme>
     </system>
@@ -778,7 +787,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Magnavox Odyssey 2</fullname>
         <path>$DATA_ROOT/roms/odyssey2</path>
         <extension>.bin .BIN .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/o2em_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/o2em_libretro.so %ROM%</command>
         <platform>odyssey2</platform>
         <theme>odyssey2</theme>
     </system>
@@ -788,7 +797,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Vectrex</fullname>
         <path>$DATA_ROOT/roms/vectrex</path>
         <extension>.vec .VEC .bin .BIN .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/vecx_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/vecx_libretro.so %ROM%</command>
         <platform>vectrex</platform>
         <theme>vectrex</theme>
     </system>
@@ -798,7 +807,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Fairchild Channel F</fullname>
         <path>$DATA_ROOT/roms/channelf</path>
         <extension>.bin .BIN .chf .CHF .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/freechaf_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/freechaf_libretro.so %ROM%</command>
         <platform>channelf</platform>
         <theme>channelf</theme>
     </system>
@@ -808,7 +817,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Mattel Intellivision</fullname>
         <path>$DATA_ROOT/roms/intellivision</path>
         <extension>.int .INT .bin .BIN .rom .ROM .zip .ZIP</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/freeintv_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/freeintv_libretro.so %ROM%</command>
         <platform>intellivision</platform>
         <theme>intellivision</theme>
     </system>
@@ -819,7 +828,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>DOS</fullname>
         <path>$DATA_ROOT/roms/dos</path>
         <extension>.exe .EXE .com .COM .bat .BAT .dosz .DOSZ .zip .ZIP</extension>
-        <command>setperf -p balanced --oc off -n 2 retroarch -L /usr/lib/libretro/dosbox_pure_libretro.so %ROM%</command>
+        <command>setperf -p balanced --oc off -n 2 retroarch -L $LIBRETRO_DIR/dosbox_pure_libretro.so %ROM%</command>
         <platform>dos</platform>
         <theme>dos</theme>
     </system>
@@ -830,7 +839,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Arcade</fullname>
         <path>$DATA_ROOT/roms/arcade</path>
         <extension>.zip .ZIP .7z</extension>
-        <command>setperf -p balanced --oc off -n 2 retroarch -L /usr/lib/libretro/fbneo_libretro.so %ROM%</command>
+        <command>setperf -p balanced --oc off -n 2 retroarch -L $LIBRETRO_DIR/fbneo_libretro.so %ROM%</command>
         <platform>arcade</platform>
         <theme>arcade</theme>
     </system>
@@ -840,7 +849,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>MAME</fullname>
         <path>$DATA_ROOT/roms/mame</path>
         <extension>.zip .ZIP .7z</extension>
-        <command>setperf -p balanced --oc off -n 2 retroarch -L /usr/lib/libretro/mame2003_plus_libretro.so %ROM%</command>
+        <command>setperf -p balanced --oc off -n 2 retroarch -L $LIBRETRO_DIR/mame2003_plus_libretro.so %ROM%</command>
         <platform>mame</platform>
         <theme>mame</theme>
     </system>
@@ -851,7 +860,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>ScummVM</fullname>
         <path>$DATA_ROOT/roms/scummvm</path>
         <extension>.scummvm .SCUMMVM</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/scummvm_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/scummvm_libretro.so %ROM%</command>
         <platform>scummvm</platform>
         <theme>scummvm</theme>
     </system>
@@ -862,7 +871,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Doom</fullname>
         <path>$DATA_ROOT/roms/doom</path>
         <extension>.wad .WAD .iwad .IWAD .pwad .PWAD</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/prboom_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/prboom_libretro.so %ROM%</command>
         <platform>doom</platform>
         <theme>doom</theme>
     </system>
@@ -873,7 +882,7 @@ cat > $DEVICE_HOME/.emulationstation/es_systems_emulation.cfg << EOF
         <fullname>Cave Story</fullname>
         <path>$DATA_ROOT/roms/cavestory</path>
         <extension>.exe .EXE</extension>
-        <command>setperf -p battery --oc battery retroarch -L /usr/lib/libretro/nxengine_libretro.so %ROM%</command>
+        <command>setperf -p battery --oc battery retroarch -L $LIBRETRO_DIR/nxengine_libretro.so %ROM%</command>
         <platform>cavestory</platform>
         <theme>cavestory</theme>
     </system>
